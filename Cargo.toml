@@ -1,0 +1,37 @@
+[workspace]
+members = [
+    "crates/api",
+    "crates/storage",
+    "crates/manifest",
+    "crates/part_builder",
+    "crates/index",
+    "crates/quant",
+    "crates/rerank",
+    "crates/bitmap",
+    "crates/text",
+    "crates/compactor",
+    "crates/common",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.7"
+bytes = "1"
+crossbeam = "0.8"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+aws-config = "1"
+aws-sdk-s3 = "1"
+opendal = "0.43"
+roaring = "0.10"
+thiserror = "1"
+uuid = { version = "1", features = ["v4"] }
