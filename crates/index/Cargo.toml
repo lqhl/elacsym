@@ -8,7 +8,14 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 common = { path = "../common" }
-manifest = { path = "../manifest" }
 quant = { path = "../quant" }
 bitmap = { path = "../bitmap" }
+rerank = { path = "../rerank" }
+
+[dev-dependencies]
+futures.workspace = true
+tempfile.workspace = true
+part_builder = { path = "../part_builder" }

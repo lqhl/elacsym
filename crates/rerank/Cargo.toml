@@ -7,7 +7,5 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-bytes.workspace = true
 tracing.workspace = true
 common = { path = "../common" }
-quant = { path = "../quant" }

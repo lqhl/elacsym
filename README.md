@@ -25,15 +25,38 @@ immutable parts stored in object storage.
    cargo fetch
    ```
 
-3. Ensure the workspace compiles:
+3. Validate the workspace builds and the core ingest/search workflows pass their tests:
 
    ```bash
    cargo check
+   cargo test --workspace
    ```
 
-The codebase is intentionally skeletal: most functions signal `todo!()`-style
-errors. The focus of this commit is to provide structure, documentation, and
-clear guidance for future contributors.
+The ingest pipeline can materialise IVF/RaBitQ/int8 artefacts on disk, and the
+search crate executes candidate generation plus reranking over those artefacts.
+
+## Testing
+
+Continuous integration runs formatting, compilation, and the full test suite.
+To exercise the most important flows locally:
+
+- Verify the ingest pipeline writes the expected artefacts:
+
+  ```bash
+  cargo test --package part_builder build_part_small_batch
+  ```
+
+- Check multi-part search, including candidate merging, using the IVF/RaBitQ stack:
+
+  ```bash
+  cargo test --package index search_merges_candidates_across_parts
+  ```
+
+- Confirm the reranking stage respects fp32 precision caps:
+
+  ```bash
+  cargo test --package index fp32_rerank_matches_exact_dot_product
+  ```
 
 ## Additional Reading
 

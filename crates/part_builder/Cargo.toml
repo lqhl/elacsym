@@ -7,8 +7,15 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
+rand.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 common = { path = "../common" }
 quant = { path = "../quant" }
 storage = { path = "../storage" }
+
+[dev-dependencies]
+futures.workspace = true
+tempfile.workspace = true

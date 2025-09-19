@@ -127,6 +127,19 @@ pub struct DeletePartPaths {
     pub ids: Option<String>,
 }
 
+/// Candidate document produced during the search pipeline.
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    /// Identifier of the part that owns this document.
+    pub part_id: PartId,
+    /// Logical document identifier within the namespace.
+    pub doc_id: DocId,
+    /// Zero-based index of the document within the owning part.
+    pub local_idx: usize,
+    /// Similarity score carried between search stages.
+    pub score: f32,
+}
+
 /// Snapshot of the full manifest view for a namespace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestView {
