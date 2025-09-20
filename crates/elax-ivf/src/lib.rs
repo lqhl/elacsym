@@ -204,7 +204,7 @@ fn update_centroids(
     rng: &mut StdRng,
 ) -> Result<f32> {
     let dim = centroids
-        .get(0)
+        .first()
         .ok_or_else(|| anyhow!("centroids must not be empty"))?
         .len();
     let mut sums = vec![vec![0.0f32; dim]; centroids.len()];
@@ -212,8 +212,8 @@ fn update_centroids(
 
     for (sample, &assignment) in samples.iter().zip(assignments.iter()) {
         ensure!(assignment < centroids.len(), "assignment out of bounds");
-        for d in 0..dim {
-            sums[assignment][d] += sample[d];
+        for (sum, value) in sums[assignment].iter_mut().zip(sample.iter().take(dim)) {
+            *sum += *value;
         }
         counts[assignment] += 1;
     }

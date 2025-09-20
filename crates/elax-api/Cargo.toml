@@ -13,7 +13,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 axum = { version = "0.7", features = ["macros"] }
 elax-core = { path = "../elax-core" }
+elax-store = { path = "../elax-store" }
 
 [dev-dependencies]
-tower = "0.4"
-hyper = { version = "0.14", features = ["client", "http1", "http2"] }
+tower = { version = "0.4", features = ["util"] }
+http-body-util = "0.1"

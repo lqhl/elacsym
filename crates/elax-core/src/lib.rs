@@ -1,11 +1,22 @@
 //! Core query planner, execution, and consistency logic for Phase 1.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use anyhow::{anyhow, Context, Result};
+use elax_ivf::{self as ivf, IvfModel, TrainParams};
 use elax_store::{Document, LocalStore, NamespaceStore, WalBatch, WalPointer, WriteOp};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+
+const IVF_MIN_TRAINING_POINTS: usize = 8;
+const IVF_MAX_LISTS: usize = 256;
+const IVF_TRAIN_SEED: u64 = 20_240_921;
+const IVF_MAX_ITERATIONS: usize = 50;
+const IVF_TOLERANCE: f32 = 1e-4;
 
 /// Registry that coordinates namespace lifecycles backed by the storage layer.
 #[derive(Clone)]
@@ -123,6 +134,8 @@ struct NamespaceInner {
     config: NamespaceConfig,
     rows: HashMap<String, Row>,
     wal_highwater: u64,
+    ivf: Option<IvfIndex>,
+    ivf_dirty: bool,
 }
 
 impl NamespaceInner {
@@ -131,6 +144,8 @@ impl NamespaceInner {
             config: NamespaceConfig::default(),
             rows: HashMap::new(),
             wal_highwater: 0,
+            ivf: None,
+            ivf_dirty: true,
         }
     }
 
@@ -146,10 +161,11 @@ impl NamespaceInner {
                 }
             }
         }
+        self.ivf_dirty = true;
         Ok(())
     }
 
-    fn search(&self, request: &QueryRequest) -> Result<Vec<QueryHit>> {
+    fn search(&mut self, request: &QueryRequest) -> Result<Vec<QueryHit>> {
         if request.top_k == 0 {
             return Ok(Vec::new());
         }
@@ -159,6 +175,55 @@ impl NamespaceInner {
             return Err(anyhow!("query vector must not be empty"));
         }
 
+        if self.ivf_dirty && request.ann_params.use_ivf {
+            self.rebuild_ivf(metric)?;
+        }
+
+        let mut results = if request.ann_params.use_ivf {
+            if let Some(index) = self.ivf.as_ref() {
+                index.search(
+                    query_vec,
+                    metric,
+                    request.top_k,
+                    &request.ann_params,
+                    &self.rows,
+                )?
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        if results.len() >= request.top_k {
+            results.truncate(request.top_k);
+            return Ok(results);
+        }
+
+        let brute = self.brute_force_search(query_vec, metric, request.top_k)?;
+        if results.is_empty() {
+            return Ok(brute);
+        }
+
+        let mut seen: HashSet<String> = results.iter().map(|hit| hit.id.clone()).collect();
+        for hit in brute {
+            if seen.insert(hit.id.clone()) {
+                results.push(hit);
+                if results.len() >= request.top_k {
+                    break;
+                }
+            }
+        }
+        results.truncate(request.top_k);
+        Ok(results)
+    }
+
+    fn brute_force_search(
+        &self,
+        query_vec: &[f32],
+        metric: DistanceMetric,
+        top_k: usize,
+    ) -> Result<Vec<QueryHit>> {
         let mut heap: Vec<(f32, &Row)> = Vec::new();
         for row in self.rows.values() {
             let Some(vector) = &row.vector else { continue };
@@ -169,8 +234,13 @@ impl NamespaceInner {
             heap.push((distance, row));
         }
 
-        heap.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        heap.truncate(request.top_k);
+        heap.sort_by(
+            |a, b| match a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal) {
+                Ordering::Equal => a.1.id.cmp(&b.1.id),
+                other => other,
+            },
+        );
+        heap.truncate(top_k);
 
         Ok(heap
             .into_iter()
@@ -180,6 +250,178 @@ impl NamespaceInner {
                 attributes: row.attributes.clone(),
             })
             .collect())
+    }
+
+    fn rebuild_ivf(&mut self, metric: DistanceMetric) -> Result<()> {
+        self.ivf = self.build_ivf_index(metric)?;
+        self.ivf_dirty = false;
+        Ok(())
+    }
+
+    fn build_ivf_index(&self, metric: DistanceMetric) -> Result<Option<IvfIndex>> {
+        let mut rows_with_vectors = Vec::new();
+        for row in self.rows.values() {
+            let Some(vector) = row.vector.as_ref() else {
+                continue;
+            };
+            if vector.is_empty() {
+                continue;
+            }
+            rows_with_vectors.push((row.id.clone(), vector.clone()));
+        }
+
+        if rows_with_vectors.len() < IVF_MIN_TRAINING_POINTS {
+            return Ok(None);
+        }
+
+        let dim = rows_with_vectors[0].1.len();
+        if dim == 0 {
+            return Ok(None);
+        }
+
+        rows_with_vectors.retain(|(_, vector)| vector.len() == dim);
+        if rows_with_vectors.len() < IVF_MIN_TRAINING_POINTS {
+            return Ok(None);
+        }
+
+        let samples = rows_with_vectors
+            .iter()
+            .map(|(_, vector)| vector.clone())
+            .collect::<Vec<Vec<f32>>>();
+
+        let nlist = compute_nlist(samples.len());
+        if nlist == 0 {
+            return Ok(None);
+        }
+
+        let params = TrainParams {
+            nlist,
+            max_iterations: IVF_MAX_ITERATIONS,
+            tolerance: IVF_TOLERANCE,
+            metric: to_ivf_metric(metric),
+            seed: IVF_TRAIN_SEED,
+        };
+
+        let model = ivf::train(&samples, params)?;
+        let mut postings = vec![Vec::new(); model.centroids().len()];
+        for (id, vector) in rows_with_vectors.iter() {
+            let assignment = model.assign(vector)?;
+            if let Some(list) = postings.get_mut(assignment.list_id) {
+                list.push(id.clone());
+            }
+        }
+
+        Ok(Some(IvfIndex::new(model, postings, metric, dim)))
+    }
+}
+
+fn compute_nlist(samples: usize) -> usize {
+    if samples == 0 {
+        return 0;
+    }
+    let approx = (samples as f32).sqrt().ceil() as usize;
+    let capped = approx.max(1).min(samples).min(IVF_MAX_LISTS);
+    capped.max(1)
+}
+
+struct IvfIndex {
+    model: IvfModel,
+    postings: Vec<Vec<String>>,
+    metric: DistanceMetric,
+    dimension: usize,
+}
+
+impl IvfIndex {
+    fn new(
+        model: IvfModel,
+        postings: Vec<Vec<String>>,
+        metric: DistanceMetric,
+        dimension: usize,
+    ) -> Self {
+        Self {
+            model,
+            postings,
+            metric,
+            dimension,
+        }
+    }
+
+    fn search(
+        &self,
+        query: &[f32],
+        metric: DistanceMetric,
+        top_k: usize,
+        ann: &AnnParams,
+        rows: &HashMap<String, Row>,
+    ) -> Result<Vec<QueryHit>> {
+        if top_k == 0 {
+            return Ok(Vec::new());
+        }
+        if metric != self.metric {
+            return Ok(Vec::new());
+        }
+        if query.len() != self.dimension {
+            return Ok(Vec::new());
+        }
+        if self.postings.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let nlist = self.postings.len();
+        let nprobe = ann
+            .nprobe
+            .filter(|value| *value > 0)
+            .map(|value| value.min(nlist))
+            .unwrap_or_else(|| ivf::nprobe_for_recall(ann.target_recall, nlist));
+        if nprobe == 0 {
+            return Ok(Vec::new());
+        }
+
+        let probes = self.model.probe_order(query, nprobe)?;
+        let mut candidates: Vec<(f32, &Row)> = Vec::new();
+        for assignment in probes {
+            if let Some(list) = self.postings.get(assignment.list_id) {
+                for id in list {
+                    let Some(row) = rows.get(id) else { continue };
+                    let Some(vector) = row.vector.as_ref() else {
+                        continue;
+                    };
+                    if vector.len() != query.len() {
+                        continue;
+                    }
+                    let distance = metric.distance(query, vector)?;
+                    candidates.push((distance, row));
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        candidates.sort_by(
+            |a, b| match a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal) {
+                Ordering::Equal => a.1.id.cmp(&b.1.id),
+                other => other,
+            },
+        );
+        candidates.truncate(top_k);
+
+        Ok(candidates
+            .into_iter()
+            .map(|(score, row)| QueryHit {
+                id: row.id.clone(),
+                score,
+                attributes: row.attributes.clone(),
+            })
+            .collect())
+    }
+}
+
+fn to_ivf_metric(metric: DistanceMetric) -> ivf::DistanceMetric {
+    match metric {
+        DistanceMetric::Cosine => ivf::DistanceMetric::Cosine,
+        DistanceMetric::EuclideanSquared => ivf::DistanceMetric::EuclideanSquared,
     }
 }
 
@@ -198,9 +440,10 @@ impl Default for NamespaceConfig {
 }
 
 /// Supported distance metrics.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum DistanceMetric {
+    #[default]
     Cosine,
     EuclideanSquared,
 }
@@ -211,12 +454,6 @@ impl DistanceMetric {
             DistanceMetric::Cosine => cosine_distance(a, b),
             DistanceMetric::EuclideanSquared => euclidean_squared(a, b),
         }
-    }
-}
-
-impl Default for DistanceMetric {
-    fn default() -> Self {
-        DistanceMetric::Cosine
     }
 }
 
@@ -297,6 +534,24 @@ impl WriteBatch {
 
 /// Query request accepted by the core layer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnnParams {
+    pub use_ivf: bool,
+    pub target_recall: f32,
+    pub nprobe: Option<usize>,
+}
+
+impl Default for AnnParams {
+    fn default() -> Self {
+        Self {
+            use_ivf: true,
+            target_recall: 0.1,
+            nprobe: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueryRequest {
     pub namespace: String,
     pub vector: Vec<f32>,
@@ -305,6 +560,8 @@ pub struct QueryRequest {
     pub metric: Option<DistanceMetric>,
     #[serde(default)]
     pub min_wal_sequence: Option<u64>,
+    #[serde(default)]
+    pub ann_params: AnnParams,
 }
 
 /// Query response containing scored hits.
@@ -363,6 +620,7 @@ mod tests {
                 top_k: 1,
                 metric: None,
                 min_wal_sequence: Some(pointer.sequence),
+                ann_params: Default::default(),
             })
             .await
             .expect("query");
@@ -398,9 +656,56 @@ mod tests {
                 top_k: 1,
                 metric: None,
                 min_wal_sequence: None,
+                ann_params: Default::default(),
             })
             .await
             .expect("query");
         assert!(response.hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ivf_query_prefers_near_cluster() {
+        let store = sample_store();
+        let registry = NamespaceRegistry::new(store);
+        let mut docs = Vec::new();
+        for i in 0..16 {
+            let position = -1.0 + i as f32 * 0.05;
+            docs.push(doc(&format!("left-{i}"), &[position, 0.0]));
+        }
+        for i in 0..16 {
+            let position = 10.0 + i as f32 * 0.05;
+            docs.push(doc(&format!("right-{i}"), &[position, 0.0]));
+        }
+
+        registry
+            .apply_write(WriteBatch {
+                namespace: "ns".to_string(),
+                upserts: docs,
+                deletes: Vec::new(),
+            })
+            .await
+            .expect("write");
+
+        let response = registry
+            .query(QueryRequest {
+                namespace: "ns".to_string(),
+                vector: vec![-0.5, 0.0],
+                top_k: 3,
+                metric: None,
+                min_wal_sequence: None,
+                ann_params: AnnParams {
+                    use_ivf: true,
+                    target_recall: 0.2,
+                    nprobe: Some(1),
+                },
+            })
+            .await
+            .expect("query");
+
+        assert!(!response.hits.is_empty(), "ivf should return candidates");
+        assert!(
+            response.hits[0].id.starts_with("left-"),
+            "expected nearest cluster to win"
+        );
     }
 }
