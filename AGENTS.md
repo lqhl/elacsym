@@ -66,3 +66,14 @@ Legend: `TODO` = not started, `DOING` = in progress, `DONE` = complete.
 - Status: TODO — Set up CI jobs enforcing `cargo fmt --all`, `cargo clippy --all-targets --all-features -D warnings`, and `cargo test --workspace`.
 - Status: TODO — Add property tests (e.g., `proptest`) for WAL ordering/recovery and ERQ distance estimates vs FP32 ground truth.
 - Status: TODO — Keep `docs/design.md` and sample configs updated as features land; capture architecture impacts in PR templates.
+
+## Progress Log (Phase 1)
+
+- 2025-09-20 — Bootstrapped Cargo workspace with crate layout matching `docs/design.md`; README and developer onboarding runbook added.
+- 2025-09-20 — Implemented Phase 1 filesystem-backed WAL (`elax-store`), in-memory FP32 search with strong consistency (`elax-core`), and HTTP API routes (`elax-api`); added integration test `crates/elax-api/tests/phase1_flow.rs`.
+- 2025-09-20 — Query-node binary launches API server using env-configurable data root/bind address.
+
+### Outstanding Issues
+
+- `cargo build` currently fails locally on user machine due to remaining compile errors after the `ObjectStore` removal; further diagnostics required once full crate graph compiles.
+- Local environment for the agent lacks network access to crates.io, blocking dependency fetches (`anyhow`, `tokio`, etc.); prevents the agent from running `cargo build/test` internally.
