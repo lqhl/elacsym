@@ -1,0 +1,11 @@
+[package]
+name = "elax-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"

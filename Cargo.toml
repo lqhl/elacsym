@@ -1,0 +1,26 @@
+[workspace]
+members = [
+    "crates/elax-api",
+    "crates/elax-core",
+    "crates/elax-store",
+    "crates/elax-indexer",
+    "crates/elax-ivf",
+    "crates/elax-erq",
+    "crates/elax-fts",
+    "crates/elax-filter",
+    "crates/elax-cache",
+    "crates/elax-metrics",
+    "crates/elax-cli",
+    "bin/query-node",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+version = "0.0.0"
+authors = ["elacsym contributors"]
+rust-version = "1.77"
+
+[workspace.metadata]
+organization = "elacsym"

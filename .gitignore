@@ -1,0 +1,14 @@
+bin/
+target/
+**/target/
+
+# Editor and OS artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Generated outputs
+*.log
