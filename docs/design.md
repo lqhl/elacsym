@@ -9,7 +9,7 @@
   * **x-bit RaBitQ** for centroid/posting-list scan (default **x=1**).
   * **y-bit RaBitQ** for candidate reranking (default **y=8**).
   * Optional FP32 rerank for maximal recall.
-* **Full-text search**: BM25 with native tokenization, filter-aware query planning.
+* **Full-text search**: **Tantivy-powered** BM25 with native tokenization and filter-aware query planning.
 * **Filtering/metadata**: zero-copy inverted indexes optimized for ranged reads on object stores.
 * **Storage model**: S3-compatible **object storage as the source of truth** (+ NVMe/memory cache).
   Writes land in an **append-only WAL**, background indexers build per-part indices.
@@ -130,7 +130,7 @@ s3://{org}/{namespace}/
   * **IVF training** on samples; store centroids.
   * Encode vectors with **ERQ-y** (default 8-bit) once; derive **ERQ-x** bits (default 1-bit) for scan.
   * Build postings per centroid list with contiguous **y-code slabs** + **docID map**.
-* **FTS**: build BM25 postings, norms, dictionary per configured attributes.
+* **FTS**: leverage **Tantivy** to build BM25 postings, norms, and dictionaries per configured attribute; persist Tantivy segments alongside part metadata.
 * **Filters**: build roaring/range indexes for filterable attributes.
 * **Router publish**: write new part, update `router.json` (epoch++), GC old parts eventually.
 
@@ -195,17 +195,38 @@ Warm path: NVMe/RAM hits, 8–15ms p50 achievable on 1M ranges.
 
 ---
 
-## 9) Full-Text Search (BM25)
+## 9) Full-Text Search (Tantivy BM25)
 
-* Per-attribute settings: `language`, `stemming`, `remove_stopwords`, `case_sensitive`, `tokenizer` (`word_v2`, `word_v1`, `word_v0`, `pre_tokenized_array`).
-* Rank operators: `BM25`, `Sum`, `Max`, `Product(weight, subop)`.
-* **Prefix** support via `last_as_prefix` in BM25 or `ContainsAllTokens`.
+We embed the [Tantivy](https://github.com/quickwit-oss/tantivy) search library to power all BM25 execution paths, mirroring the
+integration pattern from the upstream [basic search example](https://tantivy-search.github.io/examples/basic_search.html).
+
+* **Schema translation**: the `elax-fts` crate exposes a `SchemaConfig` builder that maps namespace configuration into Tantivy
+  `TextOptions`, wiring the identifier field as a stored `STRING` and BM25 fields as tokenized text with configurable boosts and
+  tokenizer overrides. Custom analyzers plug in through the built-in tokenizer registry so Phase 4 language packs remain a drop-in
+  extension.
+* **Index storage**: during part materialization, indexers stream documents into a `tantivy::IndexWriter` backed by an object-store
+  directory abstraction. Each part publishes its Tantivy segment files (`*.fast`, `*.fieldnorm`, `*.idx`, `*.store`) under
+  `parts/<part_id>/fts/tantivy/`. Query nodes mount the same object-store directory through a read-only Tantivy `Index`, caching
+  hot segments on NVMe for low-latency reopen operations. The wrapper guarantees the identifier field is persisted so search hits
+  can round-trip back into hybrid planning.
+* **Commit & reload**: indexers commit after flushing each part. Query nodes open readers with `ReloadPolicy::OnCommit`, mirroring
+  Tantivy's recommended pattern and avoiding bespoke invalidation wiring.
+* **Query execution**: `TantivyIndex::search` wraps a `QueryParser`, applies field boosts declared in the schema, and executes the
+  query via a shared `IndexSearcher`. Results land as lightweight `{score, doc_id}` pairs that feed either BM25-only responses or
+  hybrid candidate sets intersected with vector/filter paths. Ranking relies on Tantivy's built-in BM25 scorer, with hooks to inject
+  rerankers if needed.
+* **Prefix & fuzzy support**: we reuse Tantivy's `PrefixQuery` and `FuzzyTermQuery` facilities instead of bespoke operators. The
+  existing API surface (`last_as_prefix`, `ContainsAllTokens`) maps to these query constructors, maintaining backward compatibility.
+
+Operationally, this approach reduces maintenance of bespoke FTS codecs, while aligning segment lifecycle with the existing
+object-storage-first design. Future work may explore Tantivy's fast fields for metadata faceting and aggregated analytics once
+the planner requirements solidify.
 
 ---
 
 ## 10) Filtering
 
-* Operators: `Eq/NotEq/In/NotIn`, ranges (`Lt/Lte/Gt/Gte`), array ops (`Contains`, `ContainsAny`, etc.), glob/regex (regex needs opt-in index).
+* Operators: `Eq/NotEq/In/NotIn`, ranges (`Lt/Lte/Gt/Gte`), array ops (`Contains`, `ContainsAny`, etc.), glob/regex routed through Tantivy when BM25 is enabled.
 * **id** is filterable.
 * Bitmaps & range indexes are **zero-copy decoded** from cache or ranged-read.
 
@@ -296,7 +317,7 @@ elacsym/
     elax-indexer    # async indexer daemon (WAL→parts), compaction
     elax-ivf        # IVF training, assignment, centroid search
     elax-erq        # Extended RaBitQ encode/decode, estimators, SIMD kernels
-    elax-fts        # BM25 index + tokenization
+    elax-fts        # Tantivy integration (schema translation, query builders, directory glue)
     elax-filter     # roaring/range indexes
     elax-cache      # NVMe+RAM cache manager, direct I/O, mmap, prefetch
     elax-metrics    # OpenTelemetry, Prometheus exporters

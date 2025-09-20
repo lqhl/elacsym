@@ -58,7 +58,8 @@ Legend: `TODO` = not started, `DOING` = in progress, `DONE` = complete.
 - Status: DONE — Ship `elax-cli` admin tooling for compaction, verification, and export workflows.
 
 ### Phase 4 — v0.3 Feature Expansion
-- Status: TODO — Add regex index opt-in within `elax-fts` and grouped aggregation support in query planner.
+- Status: DONE — Integrate Tantivy-backed BM25 search (`elax-fts` wrapper with schema builder, search API, and tests).
+- Status: TODO — Add grouped aggregation support in query planner for BM25 responses.
 - Status: TODO — Expand multi-language FTS configurations and runbooks documenting tokenizer/stemming options.
 - Status: TODO — Publish operational runbooks in `docs/runbooks/` for cache pinning, backfill, and recall drift remediation.
 
@@ -66,6 +67,7 @@ Legend: `TODO` = not started, `DOING` = in progress, `DONE` = complete.
 - Status: TODO — Set up CI jobs enforcing `cargo fmt --all`, `cargo clippy --all-targets --all-features -D warnings`, and `cargo test --workspace`.
 - Status: TODO — Add property tests (e.g., `proptest`) for WAL ordering/recovery and ERQ distance estimates vs FP32 ground truth.
 - Status: TODO — Keep `docs/design.md` and sample configs updated as features land; capture architecture impacts in PR templates.
+- Status: TODO — Prototype Tantivy object-store directory + NVMe cache layer and document operational considerations.
 
 ## Progress Log (Phase 1)
 
