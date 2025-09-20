@@ -63,6 +63,10 @@ impl NamespaceStore {
         self.namespace_root().join("router.json")
     }
 
+    fn parts_dir(&self) -> PathBuf {
+        self.namespace_root().join("parts")
+    }
+
     async fn ensure_dirs(&self) -> Result<()> {
         fs::create_dir_all(self.wal_dir()).await.with_context(|| {
             format!(
@@ -188,6 +192,54 @@ impl NamespaceStore {
             .with_context(|| format!("renaming router file: {:?} -> {:?}", tmp_path, path))?;
         Ok(())
     }
+
+    /// Persist a part manifest to disk under the namespace parts directory.
+    pub async fn write_part_manifest(&self, manifest: &PartManifest) -> Result<PathBuf> {
+        let dir = self.parts_dir();
+        fs::create_dir_all(&dir)
+            .await
+            .with_context(|| format!("creating parts directory: {:?}", dir))?;
+        let path = dir.join(format!("{}.json", manifest.id));
+        let encoded = serde_json::to_vec_pretty(manifest).context("encoding part manifest")?;
+        fs::write(&path, encoded)
+            .await
+            .with_context(|| format!("writing part manifest: {:?}", path))?;
+        Ok(path)
+    }
+
+    /// Remove a part manifest if present.
+    pub async fn remove_part_manifest(&self, part_id: &str) -> Result<()> {
+        let path = self.parts_dir().join(format!("{}.json", part_id));
+        match fs::remove_file(&path).await {
+            Ok(_) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err).with_context(|| format!("removing part manifest: {:?}", path)),
+        }
+    }
+
+    /// List stored part manifests sorted by WAL start sequence.
+    pub async fn list_part_manifests(&self) -> Result<Vec<PartManifest>> {
+        let mut manifests = Vec::new();
+        let mut dir = match fs::read_dir(self.parts_dir()).await {
+            Ok(dir) => dir,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("reading parts directory: {:?}", self.parts_dir()))
+            }
+        };
+        while let Some(entry) = dir.next_entry().await? {
+            if !entry.file_type().await?.is_file() {
+                continue;
+            }
+            let bytes = fs::read(entry.path()).await?;
+            let manifest: PartManifest = serde_json::from_slice(&bytes)
+                .with_context(|| format!("decoding part manifest: {:?}", entry.path()))?;
+            manifests.push(manifest);
+        }
+        manifests.sort_by_key(|manifest| manifest.wal_start);
+        Ok(manifests)
+    }
 }
 
 fn parse_sequence(name: &str) -> Result<u64> {
@@ -222,6 +274,12 @@ pub struct RouterState {
     pub epoch: u64,
     pub wal_highwater: u64,
     pub updated_at: u64,
+    #[serde(default)]
+    pub indexed_wal: u64,
+    #[serde(default)]
+    pub parts: Vec<PartManifest>,
+    #[serde(default)]
+    pub pin_hot: bool,
 }
 
 impl RouterState {
@@ -231,6 +289,32 @@ impl RouterState {
             epoch: 0,
             wal_highwater: 0,
             updated_at: current_millis(),
+            indexed_wal: 0,
+            parts: Vec::new(),
+            pin_hot: false,
+        }
+    }
+}
+
+/// Metadata describing an immutable part produced by the indexer.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PartManifest {
+    pub id: String,
+    pub wal_start: u64,
+    pub wal_end: u64,
+    pub rows: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compacted_from: Vec<String>,
+}
+
+impl PartManifest {
+    pub fn new(id: impl Into<String>, wal_start: u64, wal_end: u64, rows: usize) -> Self {
+        Self {
+            id: id.into(),
+            wal_start,
+            wal_end,
+            rows,
+            compacted_from: Vec::new(),
         }
     }
 }
@@ -320,6 +404,66 @@ mod tests {
         assert_eq!(batches[0].1.operations.len(), 1);
 
         // Clean up temp dir to avoid clutter.
+        tokio::fs::remove_dir_all(dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn load_router_returns_defaults_when_missing() {
+        let (dir, ns) = temp_store();
+        let router = ns.load_router().await.expect("load router");
+        assert_eq!(router.namespace, "test");
+        assert_eq!(router.epoch, 0);
+        assert_eq!(router.wal_highwater, 0);
+        assert!(router.updated_at > 0);
+        assert_eq!(router.indexed_wal, 0);
+        assert!(router.parts.is_empty());
+        assert!(!router.pin_hot);
+
+        tokio::fs::remove_dir_all(dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn store_router_persists_state() {
+        let (dir, ns) = temp_store();
+        let mut router = RouterState::new("test".to_string());
+        router.epoch = 4;
+        router.wal_highwater = 12;
+        router.updated_at = 4242;
+        router.indexed_wal = 9;
+        router.parts.push(PartManifest::new("p1", 1, 2, 3));
+        router.pin_hot = true;
+        ns.store_router(&router)
+            .await
+            .expect("persist router state");
+
+        let loaded = ns.load_router().await.expect("load persisted router");
+        assert_eq!(loaded.epoch, 4);
+        assert_eq!(loaded.wal_highwater, 12);
+        assert_eq!(loaded.updated_at, 4242);
+        assert_eq!(loaded.indexed_wal, 9);
+        assert_eq!(loaded.parts.len(), 1);
+        assert!(loaded.pin_hot);
+
+        tokio::fs::remove_dir_all(dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn part_manifest_round_trip() {
+        let (dir, ns) = temp_store();
+        let manifest = PartManifest::new("part-1", 1, 3, 10);
+        ns.write_part_manifest(&manifest)
+            .await
+            .expect("write manifest");
+        let manifests = ns.list_part_manifests().await.expect("list manifests");
+        assert_eq!(manifests, vec![manifest]);
+        ns.remove_part_manifest("part-1")
+            .await
+            .expect("remove manifest");
+        let manifests = ns
+            .list_part_manifests()
+            .await
+            .expect("list manifests after remove");
+        assert!(manifests.is_empty());
         tokio::fs::remove_dir_all(dir).await.ok();
     }
 }

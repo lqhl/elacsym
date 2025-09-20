@@ -35,27 +35,27 @@ Update `docs/design.md` when architecture or tunables evolve. Record operational
 Legend: `TODO` = not started, `DOING` = in progress, `DONE` = complete.
 
 ### Phase 0 — Workspace Bring-Up
-- Status: TODO — Create Cargo workspace scaffolding, top-level `Cargo.toml`, and initial crate directories matching `docs/design.md` (`crates/`, `bin/`, `tests/`).
-- Status: TODO — Document build/test commands in `README.md` and ensure `cargo fmt`, `clippy`, and `test` scripts run locally.
-- Status: TODO — Add developer onboarding notes (toolchain, style) to `docs/design.md` or new `docs/runbooks/` entry.
+- Status: DONE — Create Cargo workspace scaffolding, top-level `Cargo.toml`, and initial crate directories matching `docs/design.md` (`crates/`, `bin/`, `tests/`).
+- Status: DONE — Document build/test commands in `README.md` and ensure `cargo fmt`, `clippy`, and `test` scripts run locally.
+- Status: DONE — Add developer onboarding notes (toolchain, style) to `docs/design.md` or new `docs/runbooks/` entry.
 
 ### Phase 1 — v0 Baseline (FP32 exact + ERQ-y brute fallback)
-- Status: TODO — Implement `elax-store` with WAL append, router management, and pluggable object-store clients (local + S3-compatible).
-- Status: TODO — Implement `elax-core` FP32 query path with strong consistency checks against router/WAL watermarks.
-- Status: TODO — Expose `elax-api` HTTP endpoints for `POST /v2/namespaces/:ns` writes and `POST /v2/namespaces/:ns/query` with FP32 execution.
-- Status: TODO — Provide integration tests covering strong consistency and mixed write/read batches (see Testing Guidelines).
+- Status: DONE — Implement `elax-store` with WAL append, router management, and pluggable object-store clients (local + S3-compatible).
+- Status: DONE — Implement `elax-core` FP32 query path with strong consistency checks against router/WAL watermarks.
+- Status: DONE — Expose `elax-api` HTTP endpoints for `POST /v2/namespaces/:ns` writes and `POST /v2/namespaces/:ns/query` with FP32 execution.
+- Status: DONE — Provide integration tests covering strong consistency and mixed write/read batches (see Testing Guidelines).
 
 ### Phase 2 — v0.1 IVF + ERQ Bring-Up
-- Status: DOING — Build `elax-ivf` crate for centroid training, list assignment, and nprobe selection heuristics (initial k-means++ trainer, assignment API, and nprobe heuristic landed; IVF wired into core/query planner with fallback; ERQ integration pending).
-- Status: TODO — Build `elax-erq` crate implementing Extended RaBitQ encode/decode (x-bit/y-bit) plus SIMD feature gates.
-- Status: DOING — Integrate IVF + ERQ search into `elax-core` query planner with configurable `ann_params` defaults (IVF candidate path and ANN parameter plumbing landed; ERQ wiring next).
-- Status: TODO — Implement recall evaluation endpoint (`/_debug/recall`) exercising FP32 vs ERQ paths with test fixtures.
+- Status: DONE — Build `elax-ivf` crate for centroid training, list assignment, and nprobe selection heuristics (k-means++ trainer, assignment API, and nprobe heuristic validated with core integration tests).
+- Status: DONE — Build `elax-erq` crate implementing Extended RaBitQ encode/decode (x-bit/y-bit) plus SIMD feature gates.
+- Status: DONE — Integrate IVF + ERQ search into `elax-core` query planner with configurable `ann_params` defaults, ERQ encoding, and FP32 rerank support.
+- Status: DONE — Implement recall evaluation endpoint (`/_debug/recall`) exercising FP32 vs ERQ paths with test fixtures.
 
 ### Phase 3 — v0.2 Cache, Index Maintenance, Metrics
-- Status: TODO — Implement `elax-cache` for NVMe+RAM slab management, prefetch, and eviction aligned with design.
-- Status: TODO — Extend `elax-indexer` to materialize parts, manage compaction heuristics, and publish router epochs atomically.
-- Status: TODO — Integrate `elax-metrics` (Prometheus/OpenTelemetry) into query nodes and indexers with baseline dashboards.
-- Status: TODO — Ship `elax-cli` admin tooling for compaction, verification, and export workflows.
+- Status: DONE — Implement `elax-cache` for NVMe+RAM slab management, prefetch, and eviction aligned with design.
+- Status: DONE — Extend `elax-indexer` to materialize parts, manage compaction heuristics, and publish router epochs atomically.
+- Status: DONE — Integrate `elax-metrics` (Prometheus/OpenTelemetry) into query nodes and indexers with baseline dashboards.
+- Status: DONE — Ship `elax-cli` admin tooling for compaction, verification, and export workflows.
 
 ### Phase 4 — v0.3 Feature Expansion
 - Status: TODO — Add regex index opt-in within `elax-fts` and grouped aggregation support in query planner.
@@ -77,6 +77,7 @@ Legend: `TODO` = not started, `DOING` = in progress, `DONE` = complete.
 
 - 2025-09-21 — Added `elax-ivf` k-means++ trainer with centroid assignment, probe ordering, and `nprobe` heuristic plus unit tests; remaining work tracks integration into `elax-core` planner.
 - 2025-09-22 — Wired IVF candidate search into `elax-core` with `ann_params`, automatic retraining on writes, and deterministic coverage test ensuring IVF prioritizes nearest cluster.
+- 2025-09-23 — Added ERQ quantization crate, integrated IVF+ERQ ANN planner with FP32 fallback, and exposed recall debug endpoint with coverage tests.
 
 ### Outstanding Issues
 

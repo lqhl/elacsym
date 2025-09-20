@@ -5,15 +5,17 @@ use std::{net::SocketAddr, sync::Arc};
 use anyhow::Result;
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, StatusCode},
     response::IntoResponse,
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use elax_core::{
-    AnnParams, DistanceMetric, NamespaceRegistry, QueryRequest, QueryResponse, WriteBatch,
+    AnnParams, DistanceMetric, NamespaceRegistry, QueryRequest, QueryResponse, RecallRequest,
+    RecallResponse, WriteBatch,
 };
 use elax_store::{Document, LocalStore};
+use metrics::counter;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 
@@ -37,6 +39,11 @@ impl ApiServer {
         let router: Router<()> = Router::new()
             .route("/v2/namespaces/:namespace", post(handle_write))
             .route("/v2/namespaces/:namespace/query", post(handle_query))
+            .route(
+                "/v1/namespaces/:namespace/_debug/recall",
+                post(handle_recall),
+            )
+            .route("/metrics", get(handle_metrics))
             .with_state(self.registry.clone());
         router
     }
@@ -59,20 +66,57 @@ async fn handle_write(
     State(registry): State<Arc<NamespaceRegistry>>,
     Json(payload): Json<WritePayload>,
 ) -> Result<Json<WriteResponse>, ApiError> {
-    let upserts = payload
+    const ROUTE: &str = "write";
+    let upserts = match payload
         .upserts
         .into_iter()
         .map(WriteDocument::into_document)
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(upserts) => upserts,
+        Err(err) => {
+            let status = err.status.as_u16().to_string();
+            counter!(
+                "elax_api_requests_total",
+                1,
+                "route" => ROUTE,
+                "status" => status
+            );
+            return Err(err);
+        }
+    };
+
     let batch = WriteBatch {
         namespace: namespace.clone(),
         upserts,
         deletes: payload.deletes.unwrap_or_default(),
     };
-    let pointer = registry.apply_write(batch).await?;
-    Ok(Json(WriteResponse {
-        wal_sequence: pointer.sequence,
-    }))
+
+    match registry.apply_write(batch).await {
+        Ok(pointer) => {
+            let status = StatusCode::OK.as_u16().to_string();
+            counter!(
+                "elax_api_requests_total",
+                1,
+                "route" => ROUTE,
+                "status" => status
+            );
+            Ok(Json(WriteResponse {
+                wal_sequence: pointer.sequence,
+            }))
+        }
+        Err(err) => {
+            let api_err: ApiError = err.into();
+            let status = api_err.status.as_u16().to_string();
+            counter!(
+                "elax_api_requests_total",
+                1,
+                "route" => ROUTE,
+                "status" => status
+            );
+            Err(api_err)
+        }
+    }
 }
 
 async fn handle_query(
@@ -80,6 +124,7 @@ async fn handle_query(
     State(registry): State<Arc<NamespaceRegistry>>,
     Json(payload): Json<QueryPayload>,
 ) -> Result<Json<QueryResponse>, ApiError> {
+    const ROUTE: &str = "query";
     let request = QueryRequest {
         namespace: namespace.clone(),
         vector: payload.vector,
@@ -88,8 +133,79 @@ async fn handle_query(
         min_wal_sequence: payload.min_wal_sequence,
         ann_params: payload.ann_params,
     };
-    let response = registry.query(request).await?;
-    Ok(Json(response))
+
+    match registry.query(request).await {
+        Ok(response) => {
+            let status = StatusCode::OK.as_u16().to_string();
+            counter!(
+                "elax_api_requests_total",
+                1,
+                "route" => ROUTE,
+                "status" => status
+            );
+            Ok(Json(response))
+        }
+        Err(err) => {
+            let api_err: ApiError = err.into();
+            let status = api_err.status.as_u16().to_string();
+            counter!(
+                "elax_api_requests_total",
+                1,
+                "route" => ROUTE,
+                "status" => status
+            );
+            Err(api_err)
+        }
+    }
+}
+
+async fn handle_recall(
+    Path(namespace): Path<String>,
+    State(registry): State<Arc<NamespaceRegistry>>,
+    Json(payload): Json<RecallPayload>,
+) -> Result<Json<RecallResponse>, ApiError> {
+    const ROUTE: &str = "recall";
+    let request = RecallRequest {
+        namespace: namespace.clone(),
+        num: payload.num,
+        top_k: payload.top_k,
+        queries: payload.queries,
+        ann_params: payload.ann_params,
+        metric: payload.metric,
+    };
+
+    match registry.debug_recall(request).await {
+        Ok(response) => {
+            let status = StatusCode::OK.as_u16().to_string();
+            counter!(
+                "elax_api_requests_total",
+                1,
+                "route" => ROUTE,
+                "status" => status
+            );
+            Ok(Json(response))
+        }
+        Err(err) => {
+            let api_err: ApiError = err.into();
+            let status = api_err.status.as_u16().to_string();
+            counter!(
+                "elax_api_requests_total",
+                1,
+                "route" => ROUTE,
+                "status" => status
+            );
+            Err(api_err)
+        }
+    }
+}
+
+async fn handle_metrics() -> Result<impl IntoResponse, ApiError> {
+    let body = elax_metrics::gather().map_err(|err| ApiError::internal(err.to_string()))?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        body,
+    ))
 }
 
 /// JSON payload for write batches.
@@ -135,6 +251,28 @@ struct QueryPayload {
     ann_params: AnnParams,
 }
 
+#[derive(Debug, Deserialize)]
+struct RecallPayload {
+    #[serde(default = "default_recall_num")]
+    num: usize,
+    #[serde(default = "default_recall_top_k")]
+    top_k: usize,
+    #[serde(default)]
+    queries: Option<Vec<Vec<f32>>>,
+    #[serde(default)]
+    metric: Option<DistanceMetric>,
+    #[serde(default)]
+    ann_params: AnnParams,
+}
+
+fn default_recall_num() -> usize {
+    10
+}
+
+fn default_recall_top_k() -> usize {
+    10
+}
+
 #[derive(Debug, Serialize)]
 struct WriteResponse {
     wal_sequence: u64,
@@ -150,6 +288,13 @@ impl ApiError {
     fn bad_request(msg: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
+            message: msg.into(),
+        }
+    }
+
+    fn internal(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
             message: msg.into(),
         }
     }
