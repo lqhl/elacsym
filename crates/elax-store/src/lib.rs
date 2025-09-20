@@ -1,6 +1,7 @@
 //! Storage layer abstractions for WAL, parts, and router metadata.
 
 use std::{
+    io::ErrorKind,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -109,9 +110,13 @@ impl NamespaceStore {
     /// Read all WAL batches at or after the provided sequence number.
     pub async fn load_batches_since(&self, sequence: u64) -> Result<Vec<(WalPointer, WalBatch)>> {
         let mut entries = Vec::new();
-        let mut dir = fs::read_dir(self.wal_dir())
-            .await
-            .with_context(|| format!("reading WAL dir: {:?}", self.wal_dir()))?;
+        let mut dir = match fs::read_dir(self.wal_dir()).await {
+            Ok(dir) => dir,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(err).with_context(|| format!("reading WAL dir: {:?}", self.wal_dir()))
+            }
+        };
         while let Some(entry) = dir.next_entry().await? {
             if !entry.file_type().await?.is_file() {
                 continue;
@@ -165,17 +170,22 @@ impl NamespaceStore {
         }
 
         let encoded = serde_json::to_vec(router).context("encoding router state")?;
-        let mut file = fs::File::create(&path)
+        let tmp_path = path.with_extension("json.tmp");
+        let mut file = fs::File::create(&tmp_path)
             .await
-            .with_context(|| format!("creating router file: {:?}", path))?;
+            .with_context(|| format!("creating router file: {:?}", tmp_path))?;
         file.write_all(&encoded)
             .await
-            .with_context(|| format!("writing router file: {:?}", path))?;
+            .with_context(|| format!("writing router file: {:?}", tmp_path))?;
         if self.fsync {
             file.sync_all()
                 .await
-                .with_context(|| format!("fsync router file: {:?}", path))?;
+                .with_context(|| format!("fsync router file: {:?}", tmp_path))?;
         }
+        drop(file);
+        fs::rename(&tmp_path, &path)
+            .await
+            .with_context(|| format!("renaming router file: {:?} -> {:?}", tmp_path, path))?;
         Ok(())
     }
 }
@@ -286,7 +296,7 @@ mod tests {
 
     #[tokio::test]
     async fn appending_batches_advances_sequence_and_router() {
-        let (dir, ns) = temp_store();
+        let (_dir, ns) = temp_store();
         let first = ns.append_batch(&sample_batch(1)).await.expect("append 1");
         assert_eq!(first.sequence, 1);
         let router = ns.load_router().await.expect("load router");

@@ -10,7 +10,9 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use elax_core::{DistanceMetric, NamespaceRegistry, QueryRequest, QueryResponse, WriteBatch};
+use elax_core::{
+    AnnParams, DistanceMetric, NamespaceRegistry, QueryRequest, QueryResponse, WriteBatch,
+};
 use elax_store::{Document, LocalStore};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
@@ -31,18 +33,18 @@ impl ApiServer {
     }
 
     /// Build the HTTP router for the current server state.
-    pub fn router(&self) -> Router<Arc<NamespaceRegistry>> {
-        Router::new()
+    pub fn router(&self) -> Router<()> {
+        let router: Router<()> = Router::new()
             .route("/v2/namespaces/:namespace", post(handle_write))
             .route("/v2/namespaces/:namespace/query", post(handle_query))
-            .with_state(self.registry.clone())
+            .with_state(self.registry.clone());
+        router
     }
 
     /// Run the HTTP server until shutdown on the provided address.
     pub async fn run(self, addr: SocketAddr) -> Result<()> {
-        let router = self.router();
         let listener = TcpListener::bind(addr).await?;
-        axum::serve(listener, router).await?;
+        axum::serve(listener, self.router().into_make_service()).await?;
         Ok(())
     }
 
@@ -84,6 +86,7 @@ async fn handle_query(
         top_k: payload.top_k.unwrap_or(10),
         metric: payload.metric,
         min_wal_sequence: payload.min_wal_sequence,
+        ann_params: payload.ann_params,
     };
     let response = registry.query(request).await?;
     Ok(Json(response))
@@ -128,6 +131,8 @@ struct QueryPayload {
     metric: Option<DistanceMetric>,
     #[serde(default)]
     min_wal_sequence: Option<u64>,
+    #[serde(default)]
+    ann_params: AnnParams,
 }
 
 #[derive(Debug, Serialize)]

@@ -22,3 +22,9 @@ impl Cache {
         Ok(())
     }
 }
+
+impl Default for Cache {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -46,9 +46,9 @@ Legend: `TODO` = not started, `DOING` = in progress, `DONE` = complete.
 - Status: TODO — Provide integration tests covering strong consistency and mixed write/read batches (see Testing Guidelines).
 
 ### Phase 2 — v0.1 IVF + ERQ Bring-Up
-- Status: DOING — Build `elax-ivf` crate for centroid training, list assignment, and nprobe selection heuristics (initial k-means++ trainer, assignment API, and nprobe heuristic landed; integration with core/query planner pending).
+- Status: DOING — Build `elax-ivf` crate for centroid training, list assignment, and nprobe selection heuristics (initial k-means++ trainer, assignment API, and nprobe heuristic landed; IVF wired into core/query planner with fallback; ERQ integration pending).
 - Status: TODO — Build `elax-erq` crate implementing Extended RaBitQ encode/decode (x-bit/y-bit) plus SIMD feature gates.
-- Status: TODO — Integrate IVF + ERQ search into `elax-core` query planner with configurable `ann_params` defaults.
+- Status: DOING — Integrate IVF + ERQ search into `elax-core` query planner with configurable `ann_params` defaults (IVF candidate path and ANN parameter plumbing landed; ERQ wiring next).
 - Status: TODO — Implement recall evaluation endpoint (`/_debug/recall`) exercising FP32 vs ERQ paths with test fixtures.
 
 ### Phase 3 — v0.2 Cache, Index Maintenance, Metrics
@@ -76,6 +76,7 @@ Legend: `TODO` = not started, `DOING` = in progress, `DONE` = complete.
 ## Progress Log (Phase 2)
 
 - 2025-09-21 — Added `elax-ivf` k-means++ trainer with centroid assignment, probe ordering, and `nprobe` heuristic plus unit tests; remaining work tracks integration into `elax-core` planner.
+- 2025-09-22 — Wired IVF candidate search into `elax-core` with `ann_params`, automatic retraining on writes, and deterministic coverage test ensuring IVF prioritizes nearest cluster.
 
 ### Outstanding Issues
 

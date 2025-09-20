@@ -1,7 +1,10 @@
-use axum::{body::Body, http::Request};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use elax_api::ApiServer;
 use elax_store::LocalStore;
-use hyper::StatusCode;
+use http_body_util::BodyExt;
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tower::ServiceExt; // for oneshot
@@ -24,7 +27,7 @@ fn temp_store() -> LocalStore {
 async fn write_and_query_round_trip() {
     let store = temp_store();
     let server = ApiServer::new(store);
-    let mut app = server.router();
+    let app = server.router();
 
     let write_body = json!({
         "upserts": [
@@ -46,8 +49,15 @@ async fn write_and_query_round_trip() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    if status != StatusCode::OK {
+        panic!(
+            "write failed: status={} body={}",
+            status,
+            String::from_utf8_lossy(&bytes)
+        );
+    }
     let write_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let wal_sequence = write_json["wal_sequence"].as_u64().unwrap();
 
@@ -69,8 +79,15 @@ async fn write_and_query_round_trip() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    if status != StatusCode::OK {
+        panic!(
+            "query failed: status={} body={}",
+            status,
+            String::from_utf8_lossy(&bytes)
+        );
+    }
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let hits = value["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
