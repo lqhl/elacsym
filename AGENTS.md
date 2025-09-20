@@ -46,7 +46,7 @@ Legend: `TODO` = not started, `DOING` = in progress, `DONE` = complete.
 - Status: TODO — Provide integration tests covering strong consistency and mixed write/read batches (see Testing Guidelines).
 
 ### Phase 2 — v0.1 IVF + ERQ Bring-Up
-- Status: TODO — Build `elax-ivf` crate for centroid training, list assignment, and nprobe selection heuristics.
+- Status: DOING — Build `elax-ivf` crate for centroid training, list assignment, and nprobe selection heuristics (initial k-means++ trainer, assignment API, and nprobe heuristic landed; integration with core/query planner pending).
 - Status: TODO — Build `elax-erq` crate implementing Extended RaBitQ encode/decode (x-bit/y-bit) plus SIMD feature gates.
 - Status: TODO — Integrate IVF + ERQ search into `elax-core` query planner with configurable `ann_params` defaults.
 - Status: TODO — Implement recall evaluation endpoint (`/_debug/recall`) exercising FP32 vs ERQ paths with test fixtures.
@@ -73,7 +73,12 @@ Legend: `TODO` = not started, `DOING` = in progress, `DONE` = complete.
 - 2025-09-20 — Implemented Phase 1 filesystem-backed WAL (`elax-store`), in-memory FP32 search with strong consistency (`elax-core`), and HTTP API routes (`elax-api`); added integration test `crates/elax-api/tests/phase1_flow.rs`.
 - 2025-09-20 — Query-node binary launches API server using env-configurable data root/bind address.
 
+## Progress Log (Phase 2)
+
+- 2025-09-21 — Added `elax-ivf` k-means++ trainer with centroid assignment, probe ordering, and `nprobe` heuristic plus unit tests; remaining work tracks integration into `elax-core` planner.
+
 ### Outstanding Issues
 
 - `cargo build` currently fails locally on user machine due to remaining compile errors after the `ObjectStore` removal; further diagnostics required once full crate graph compiles.
 - Local environment for the agent lacks network access to crates.io, blocking dependency fetches (`anyhow`, `tokio`, etc.); prevents the agent from running `cargo build/test` internally.
+- Workspace metadata commands (`cargo fmt`, `cargo test`, etc.) fail until the referenced `bin/query-node` crate is restored in the repository.
