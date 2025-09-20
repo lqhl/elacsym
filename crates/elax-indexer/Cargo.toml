@@ -9,3 +9,8 @@ rust-version.workspace = true
 [dependencies]
 anyhow = "1"
 elax-store = { path = "../elax-store" }
+metrics = "0.21"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tempfile = "3"

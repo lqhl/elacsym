@@ -10,6 +10,9 @@ rust-version.workspace = true
 anyhow = "1"
 elax-store = { path = "../elax-store" }
 elax-ivf = { path = "../elax-ivf" }
+elax-erq = { path = "../elax-erq" }
+elax-metrics = { path = "../elax-metrics" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "macros"] }
+metrics = "0.21"

@@ -9,3 +9,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow = "1"
 parking_lot = "0.12"
+metrics = "0.21"
+
+[dev-dependencies]
+tempfile = "3"
