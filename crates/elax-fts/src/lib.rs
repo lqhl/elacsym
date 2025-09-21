@@ -10,6 +10,10 @@ use tantivy::schema::{
 };
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy};
 
+mod language;
+
+pub use language::{FtsLanguage, LanguageOptions, LanguagePack, LanguagePackConfig};
+
 /// Declarative configuration for a Tantivy-backed FTS schema.
 #[derive(Clone)]
 pub struct SchemaConfig {
@@ -42,6 +46,24 @@ impl SchemaConfig {
     ) -> Self {
         self.tokenizers.push((name.into(), analyzer));
         self
+    }
+
+    /// Registers a [`LanguagePack`] analyzer and makes it available to schema fields.
+    pub fn register_language_pack(mut self, pack: LanguagePack) -> Self {
+        let (name, analyzer) = pack.into_named_analyzer();
+        if !self
+            .tokenizers
+            .iter()
+            .any(|(existing, _)| existing == &name)
+        {
+            self.tokenizers.push((name, analyzer));
+        }
+        self
+    }
+
+    /// Registers a [`LanguagePackConfig`] by materializing its analyzer.
+    pub fn register_language_pack_config(self, config: LanguagePackConfig) -> Self {
+        self.register_language_pack(config.into())
     }
 }
 
@@ -76,6 +98,12 @@ impl TextFieldConfig {
     /// Overrides the tokenizer used for the field.
     pub fn with_tokenizer(mut self, tokenizer: impl Into<String>) -> Self {
         self.tokenizer = Some(tokenizer.into());
+        self
+    }
+
+    /// Assigns the tokenizer registered by the provided [`LanguagePack`].
+    pub fn with_language(mut self, pack: &LanguagePack) -> Self {
+        self.tokenizer = Some(pack.tokenizer_name().to_string());
         self
     }
 
@@ -267,7 +295,79 @@ pub struct SearchHit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tantivy::doc;
+    use tantivy::{doc, tokenizer::TextAnalyzer};
+
+    fn collect_tokens(mut analyzer: TextAnalyzer, text: &str) -> Vec<String> {
+        let mut stream = analyzer.token_stream(text);
+        let mut tokens = Vec::new();
+        while stream.advance() {
+            tokens.push(stream.token().text.clone());
+        }
+        tokens
+    }
+
+    #[test]
+    fn schema_config_registers_language_pack() -> Result<()> {
+        let french = LanguagePack::new(FtsLanguage::French);
+        let field_pack = french.clone();
+
+        let config = SchemaConfig::new("doc_id")
+            .register_language_pack(french)
+            .add_text_field(TextFieldConfig::new("body").with_language(&field_pack));
+        let index = TantivyIndex::create_in_ram(config)?;
+
+        let mut analyzer = index
+            .index()
+            .tokenizers()
+            .get(field_pack.tokenizer_name())
+            .expect("tokenizer registered");
+        let mut stream = analyzer.token_stream("Déjà vu dans les forêts");
+        let mut tokens = Vec::new();
+        while stream.advance() {
+            tokens.push(stream.token().text.clone());
+        }
+
+        // Lower casing and ASCII folding normalize accents, stemming trims suffixes,
+        // and stop words remove common fillers such as "les" and "dans".
+        assert_eq!(tokens, vec!["dej", "vu", "foret"]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn schema_config_registers_language_pack_config() -> Result<()> {
+        let config = LanguagePackConfig {
+            language: FtsLanguage::Portuguese,
+            name: Some("pt_custom".to_string()),
+            stemming: Some(false),
+            stop_words: None,
+            ascii_folding: Some(false),
+            lower_case: Some(false),
+            remove_long_limit: Some(Some(60)),
+        };
+
+        let pack: LanguagePack = config.clone().into();
+        assert_eq!(pack.tokenizer_name(), "pt_custom");
+        assert!(!pack.options().stemming);
+        assert!(!pack.options().ascii_folding);
+        assert!(!pack.options().lower_case);
+        assert_eq!(pack.options().remove_long_limit, Some(60));
+
+        let schema = SchemaConfig::new("doc_id")
+            .register_language_pack_config(config)
+            .add_text_field(TextFieldConfig::new("body").with_tokenizer("pt_custom"));
+        let index = TantivyIndex::create_in_ram(schema)?;
+
+        let analyzer = index
+            .index()
+            .tokenizers()
+            .get("pt_custom")
+            .expect("tokenizer registered");
+        let tokens = collect_tokens(analyzer, "Programação avançada");
+        assert!(tokens.contains(&"Programação".to_string()));
+
+        Ok(())
+    }
 
     #[test]
     fn bm25_search_prefers_strong_match() -> Result<()> {

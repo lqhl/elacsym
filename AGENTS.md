@@ -59,9 +59,9 @@ Legend: `TODO` = not started, `DOING` = in progress, `DONE` = complete.
 
 ### Phase 4 — v0.3 Feature Expansion
 - Status: DONE — Integrate Tantivy-backed BM25 search (`elax-fts` wrapper with schema builder, search API, and tests).
-- Status: TODO — Add grouped aggregation support in query planner for BM25 responses.
-- Status: TODO — Expand multi-language FTS configurations and runbooks documenting tokenizer/stemming options.
-- Status: TODO — Publish operational runbooks in `docs/runbooks/` for cache pinning, backfill, and recall drift remediation.
+- Status: DONE — Add grouped aggregation support in query planner for BM25 responses.
+- Status: DONE — Expand multi-language FTS configurations and runbooks documenting tokenizer/stemming options.
+- Status: DONE — Publish operational runbooks in `docs/runbooks/` for cache pinning, backfill, and recall drift remediation.
 
 ### Cross-Cutting Workstreams
 - Status: TODO — Set up CI jobs enforcing `cargo fmt --all`, `cargo clippy --all-targets --all-features -D warnings`, and `cargo test --workspace`.
