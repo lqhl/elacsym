@@ -92,3 +92,7 @@ Legend: `TODO` = not started, `DOING` = in progress, `DONE` = complete.
 
 #### Namespace schema & advanced ERQ capabilities
 - Status: TODO — Persist namespace schemas (attribute types, distance metric, analyzers) and extend the ERQ crate with codebook learning, residual coding, and SIMD kernel dispatch validated by property tests.
+
+#### Tantivy directory runtime isolation
+- Status: DONE — Switch the `ObjectStoreDirectory` to use a dedicated Tokio runtime instead of `Handle::block_on` to avoid panics when invoked from async query handlers.
+- Status: DONE — Add regression coverage exercising the directory from within an active Tokio runtime to ensure reads and writes succeed without blocking the caller's executor.
