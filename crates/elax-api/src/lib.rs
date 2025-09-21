@@ -14,6 +14,7 @@ use elax_core::{
     AnnParams, DistanceMetric, GroupBy, NamespaceRegistry, QueryRequest, QueryResponse,
     RecallRequest, RecallResponse, WriteBatch,
 };
+use elax_filter::FilterExpr;
 use elax_store::{Document, LocalStore};
 use metrics::counter;
 use serde::{Deserialize, Serialize};
@@ -133,6 +134,8 @@ async fn handle_query(
         min_wal_sequence: payload.min_wal_sequence,
         ann_params: payload.ann_params,
         group_by: payload.group_by,
+        filters: payload.filters,
+        filter_bitmap_ids: payload.filter_bitmap_ids,
     };
 
     match registry.query(request).await {
@@ -252,6 +255,10 @@ struct QueryPayload {
     ann_params: AnnParams,
     #[serde(default)]
     group_by: Option<GroupBy>,
+    #[serde(default)]
+    filters: Option<FilterExpr>,
+    #[serde(default)]
+    filter_bitmap_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]

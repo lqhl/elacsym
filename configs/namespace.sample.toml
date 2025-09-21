@@ -1,0 +1,44 @@
+# Example namespace configuration for elacsym.
+# Tune these values per dataset and keep synchronized with docs/design.md.
+
+namespace = "example-namespace"
+description = "Dev dataset with ERQ + BM25 hybrid search"
+
+[vector]
+dimension = 1536
+distance = "cosine_distance"
+encoder = "erq"
+x_bits = 1
+y_bits = 8
+rerank_scale = 5
+fp32_rerank = true
+
+[ann]
+# Target probe ratio is relative to IVF list count.
+nprobe_ratio = 0.05
+min_probes = 8
+max_probes = 64
+
+[fts]
+default_language = "en"
+language_packs = ["en", "fr"]
+
+[[fts.fields]]
+name = "title"
+type = "text"
+boost = 2.0
+
+[[fts.fields]]
+name = "body"
+type = "text"
+boost = 1.0
+
+[[attributes]]
+name = "category"
+type = "keyword"
+filterable = true
+
+[[attributes]]
+name = "timestamp"
+type = "timestamp"
+filterable = true

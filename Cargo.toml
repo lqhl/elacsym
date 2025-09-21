@@ -11,6 +11,7 @@ members = [
     "crates/elax-cache",
     "crates/elax-metrics",
     "crates/elax-cli",
+    "crates/elax-config",
     "bin/query-node",
 ]
 resolver = "2"
@@ -22,5 +23,17 @@ version = "0.0.0"
 authors = ["elacsym contributors"]
 rust-version = "1.77"
 
+[workspace.dependencies]
+object_store = { version = "0.7", default-features = false, features = ["aws", "gcp", "http"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_with = "3"
+toml = "0.8"
+zstd-sys = "=2.0.1"
+
+[patch.crates-io]
+zstd-safe = { path = "third_party/zstd-safe" }
+
 [workspace.metadata]
 organization = "elacsym"
+

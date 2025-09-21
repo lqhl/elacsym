@@ -1,0 +1,53 @@
+# Example configuration for an elacsym query node.
+# Keep this file in sync with docs/design.md when defaults change.
+
+[cluster]
+org = "example-org"
+environment = "dev"
+router_refresh_ms = 1000
+
+[object_store]
+# Supported kinds: "s3", "gcs", "filesystem".
+kind = "s3"
+bucket = "elacsym-dev"
+prefix = "example-org/dev"
+endpoint = "https://s3.example.com"
+# For filesystem deployments, set `path = "/var/lib/elacsym/object_store"`.
+# Credentials are typically provided via environment variables.
+
+[wal]
+prefix = "s3://example-org/dev/wal/"
+batch_interval_ms = 1000
+compression = "zstd"
+
+[cache]
+# NVMe cache keeps warm ERQ slabs and Tantivy segments on local disk.
+[cache.nvme]
+mount_path = "/var/lib/elacsym/cache"
+max_bytes = 500_000_000_000
+prefetch_postings = true
+
+# RAM cache pins centroids, router metadata, and frequently accessed payloads.
+[cache.ram]
+max_bytes = 64_000_000_000
+
+[query.defaults]
+# Rerank candidates = top_k * rerank_candidates.
+rerank_mode = "erq_y"
+rerank_candidates = 5
+nprobe_ratio = 0.05
+max_probes = 64
+fp32_rerank = true
+
+[query.tail_scan]
+max_batch_rows = 2048
+
+[fts]
+language_packs = ["en", "es", "fr"]
+
+[telemetry.prometheus]
+bind = "0.0.0.0:9000"
+
+[telemetry.opentelemetry]
+endpoint = "http://otel-collector:4317"
+service_name = "elacsym-query-node"

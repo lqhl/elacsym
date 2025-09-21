@@ -93,6 +93,7 @@ pub enum AssetKind {
     RerankCodes,
     Filters,
     Blob,
+    TantivySegment,
 }
 
 impl AssetKind {
@@ -103,6 +104,7 @@ impl AssetKind {
             AssetKind::RerankCodes => "rerank",
             AssetKind::Filters => "filters",
             AssetKind::Blob => "blob",
+            AssetKind::TantivySegment => "tantivy_segment",
         }
     }
 }
@@ -297,6 +299,39 @@ impl Cache {
         }
     }
 
+    /// Remove an asset from the cache, deleting its NVMe backing file and returning whether the
+    /// entry existed.
+    pub fn remove(&self, key: &CacheKey) -> Result<bool> {
+        let mut guard = self.state.lock();
+        let Some(entry) = guard.entries.remove(key) else {
+            return Ok(false);
+        };
+
+        if let Some(bytes) = entry.resident {
+            drop(bytes);
+            guard.ram_used = guard.ram_used.saturating_sub(entry.allocated);
+        }
+
+        if entry.path.exists() {
+            match fs::remove_file(&entry.path) {
+                Ok(_) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(err)
+                        .with_context(|| format!("removing cache asset file: {:?}", entry.path));
+                }
+            }
+        }
+
+        gauge!(
+            "elax_cache_ram_bytes",
+            guard.ram_used as f64,
+            "namespace" => entry.namespace.clone()
+        );
+
+        Ok(true)
+    }
+
     fn align(&self, size: usize) -> usize {
         let slab = self.config.slab_bytes;
         size.div_ceil(slab) * slab
@@ -465,5 +500,20 @@ mod tests {
         assert!(loaded);
         let value = cache.get(&key).unwrap().unwrap();
         assert_eq!(value.len(), 1024);
+    }
+
+    #[test]
+    fn remove_drops_entry_and_file() {
+        let (_temp, config) = cache_config();
+        let cache = Cache::new(config).unwrap();
+        let key = sample_key("ns", 7);
+        cache
+            .insert(key.clone(), Arc::new(vec![1u8; 64]))
+            .expect("insert");
+        let path = cache.asset_path(&key);
+        assert!(path.exists());
+        assert!(cache.remove(&key).unwrap());
+        assert!(!path.exists());
+        assert!(!cache.remove(&key).unwrap());
     }
 }

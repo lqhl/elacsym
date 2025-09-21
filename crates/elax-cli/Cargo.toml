@@ -11,5 +11,6 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 elax-indexer = { path = "../elax-indexer" }
 elax-store = { path = "../elax-store" }
+elax-config = { path = "../elax-config" }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -10,8 +10,10 @@ use tantivy::schema::{
 };
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy};
 
+mod directory;
 mod language;
 
+pub use directory::ObjectStoreDirectory;
 pub use language::{FtsLanguage, LanguageOptions, LanguagePack, LanguagePackConfig};
 
 /// Declarative configuration for a Tantivy-backed FTS schema.

@@ -15,6 +15,7 @@ axum = { version = "0.7", features = ["macros"] }
 elax-core = { path = "../elax-core" }
 elax-store = { path = "../elax-store" }
 elax-metrics = { path = "../elax-metrics" }
+elax-filter = { path = "../elax-filter" }
 metrics = "0.21"
 
 [dev-dependencies]

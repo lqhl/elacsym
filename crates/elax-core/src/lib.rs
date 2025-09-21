@@ -12,6 +12,7 @@ use elax_erq::{
     self as erq, DistanceMetric as ErqDistanceMetric, EncodedVector as ErqEncodedVector,
     Model as ErqModel, TrainConfig as ErqTrainConfig,
 };
+use elax_filter::{FilterBitmap, FilterExpr};
 use elax_ivf::{self as ivf, IvfModel, TrainParams};
 use elax_store::{Document, LocalStore, NamespaceStore, WalBatch, WalPointer, WriteOp};
 use metrics::{counter, gauge, histogram};
@@ -232,18 +233,49 @@ impl NamespaceInner {
         let mut ann_params = request.ann_params.clone();
         ann_params.fill_defaults();
 
+        let filter_bitmap = self.build_filter_bitmap(request)?;
+        if let Some(bitmap) = filter_bitmap.as_ref() {
+            if bitmap.is_empty() {
+                return Ok(Vec::new());
+            }
+        }
+
+        let plan = if let Some(bitmap) = filter_bitmap.as_ref() {
+            select_query_plan(
+                self.rows.len(),
+                bitmap.len(),
+                ann_params.candidate_budget(request.top_k),
+                ann_params.use_ivf,
+            )
+        } else {
+            QueryPlan::VectorFirst
+        };
+
+        if matches!(plan, QueryPlan::FilterFirst) {
+            return self.brute_force_search(
+                query_vec,
+                metric,
+                request.top_k,
+                filter_bitmap.as_ref(),
+            );
+        }
+
         if ann_params.use_ivf {
             self.ensure_ivf(metric, &ann_params)?;
         }
 
         let mut results = self.ann_hits(query_vec, metric, request.top_k, &ann_params)?;
+        if let Some(bitmap) = filter_bitmap.as_ref() {
+            results.retain(|hit| bitmap.contains(&hit.id));
+        }
         if results.len() >= request.top_k {
             results.sort_by(compare_hits);
             results.truncate(request.top_k);
             return Ok(results);
         }
 
-        let brute = self.brute_force_search(query_vec, metric, request.top_k)?;
+        let brute =
+            self.brute_force_search(query_vec, metric, request.top_k, filter_bitmap.as_ref())?;
         if results.is_empty() {
             return Ok(brute);
         }
@@ -257,6 +289,36 @@ impl NamespaceInner {
         results.sort_by(compare_hits);
         results.truncate(request.top_k);
         Ok(results)
+    }
+
+    fn build_filter_bitmap(&self, request: &QueryRequest) -> Result<Option<FilterBitmap>> {
+        let mut bitmap = request
+            .filter_bitmap_ids
+            .as_ref()
+            .map(|ids| FilterBitmap::from_ids(ids.iter().cloned()));
+
+        if let Some(expr) = request.filters.as_ref() {
+            let expr_bitmap = self.evaluate_filter(expr)?;
+            bitmap = match bitmap {
+                Some(mut existing) => {
+                    existing.intersect(&expr_bitmap);
+                    Some(existing)
+                }
+                None => Some(expr_bitmap),
+            };
+        }
+
+        Ok(bitmap)
+    }
+
+    fn evaluate_filter(&self, filter: &FilterExpr) -> Result<FilterBitmap> {
+        let mut matches = Vec::new();
+        for row in self.rows.values() {
+            if elax_filter::evaluate(filter, row.attributes.as_ref(), Some(row.id.as_str()))? {
+                matches.push(row.id.clone());
+            }
+        }
+        Ok(FilterBitmap::from_ids(matches))
     }
 
     fn group_hits(
@@ -367,7 +429,7 @@ impl NamespaceInner {
                 Ok(hits) => hits,
                 Err(_) => continue,
             };
-            let brute_hits = match self.brute_force_search(&query, metric, top_k) {
+            let brute_hits = match self.brute_force_search(&query, metric, top_k, None) {
                 Ok(hits) => hits,
                 Err(_) => continue,
             };
@@ -404,9 +466,15 @@ impl NamespaceInner {
         query_vec: &[f32],
         metric: DistanceMetric,
         top_k: usize,
+        filter: Option<&FilterBitmap>,
     ) -> Result<Vec<QueryHit>> {
         let mut heap: Vec<(f32, &Row)> = Vec::new();
         for row in self.rows.values() {
+            if let Some(bitmap) = filter {
+                if !bitmap.contains(&row.id) {
+                    continue;
+                }
+            }
             let Some(vector) = &row.vector else { continue };
             if vector.len() != query_vec.len() {
                 continue;
@@ -881,6 +949,39 @@ pub struct QueryRequest {
     pub ann_params: AnnParams,
     #[serde(default)]
     pub group_by: Option<GroupBy>,
+    #[serde(default)]
+    pub filters: Option<FilterExpr>,
+    #[serde(default)]
+    pub filter_bitmap_ids: Option<Vec<String>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryPlan {
+    VectorFirst,
+    FilterFirst,
+}
+
+fn select_query_plan(
+    total_rows: usize,
+    filtered_rows: usize,
+    candidate_budget: usize,
+    ann_enabled: bool,
+) -> QueryPlan {
+    if !ann_enabled {
+        return QueryPlan::FilterFirst;
+    }
+    if filtered_rows == 0 || total_rows == 0 {
+        return QueryPlan::FilterFirst;
+    }
+    if filtered_rows <= candidate_budget.max(1) {
+        return QueryPlan::FilterFirst;
+    }
+    let selectivity = filtered_rows as f32 / total_rows as f32;
+    if selectivity <= 0.2 {
+        QueryPlan::FilterFirst
+    } else {
+        QueryPlan::VectorFirst
+    }
 }
 
 /// Query response containing scored hits.
@@ -1079,6 +1180,26 @@ mod tests {
         assert_eq!(params.candidate_budget(4), 4);
     }
 
+    #[test]
+    fn planner_prefers_filter_first_for_selective_predicates() {
+        assert_eq!(
+            select_query_plan(1_000, 10, 50, true),
+            QueryPlan::FilterFirst
+        );
+        assert_eq!(
+            select_query_plan(1_000, 400, 50, true),
+            QueryPlan::VectorFirst
+        );
+        assert_eq!(
+            select_query_plan(1_000, 200, 220, true),
+            QueryPlan::FilterFirst
+        );
+        assert_eq!(
+            select_query_plan(1_000, 200, 50, false),
+            QueryPlan::FilterFirst
+        );
+    }
+
     #[tokio::test]
     async fn write_then_query_returns_row() {
         let store = sample_store();
@@ -1098,6 +1219,8 @@ mod tests {
                 min_wal_sequence: Some(pointer.sequence),
                 ann_params: Default::default(),
                 group_by: None,
+                filters: None,
+                filter_bitmap_ids: None,
             })
             .await
             .expect("query");
@@ -1135,6 +1258,8 @@ mod tests {
                 min_wal_sequence: None,
                 ann_params: Default::default(),
                 group_by: None,
+                filters: None,
+                filter_bitmap_ids: None,
             })
             .await
             .expect("query");
@@ -1178,6 +1303,8 @@ mod tests {
                     ..Default::default()
                 },
                 group_by: None,
+                filters: None,
+                filter_bitmap_ids: None,
             })
             .await
             .expect("query");
@@ -1211,6 +1338,8 @@ mod tests {
                 min_wal_sequence: Some(pointer.sequence + 1),
                 ann_params: Default::default(),
                 group_by: None,
+                filters: None,
+                filter_bitmap_ids: None,
             })
             .await
             .expect_err("consistency requirement should fail");
@@ -1252,6 +1381,8 @@ mod tests {
                 min_wal_sequence: Some(second_pointer.sequence),
                 ann_params: Default::default(),
                 group_by: None,
+                filters: None,
+                filter_bitmap_ids: None,
             })
             .await
             .expect("query should reload WAL");
@@ -1291,6 +1422,8 @@ mod tests {
                     ..Default::default()
                 },
                 group_by: None,
+                filters: None,
+                filter_bitmap_ids: None,
             })
             .await
             .expect("brute-force query");
@@ -1343,6 +1476,8 @@ mod tests {
                     limit: 5,
                     per_group_limit: 2,
                 }),
+                filters: None,
+                filter_bitmap_ids: None,
             })
             .await
             .expect("grouped query");
@@ -1399,5 +1534,106 @@ mod tests {
         assert_eq!(response.evaluated, 6);
         assert!((response.avg_recall - 1.0).abs() < 1e-6);
         assert!(response.avg_ann_count >= 3.0);
+    }
+
+    #[tokio::test]
+    async fn filters_trim_result_set() {
+        let store = sample_store();
+        let registry = NamespaceRegistry::new(store);
+        let docs = vec![
+            Document {
+                id: "doc-1".to_string(),
+                vector: Some(vec![1.0, 0.0]),
+                attributes: Some(json!({ "category": "news" })),
+            },
+            Document {
+                id: "doc-2".to_string(),
+                vector: Some(vec![0.0, 1.0]),
+                attributes: Some(json!({ "category": "sports" })),
+            },
+        ];
+
+        registry
+            .apply_write(WriteBatch {
+                namespace: "ns".to_string(),
+                upserts: docs,
+                deletes: Vec::new(),
+            })
+            .await
+            .expect("seed docs");
+
+        let response = registry
+            .query(QueryRequest {
+                namespace: "ns".to_string(),
+                vector: vec![1.0, 0.0],
+                top_k: 2,
+                metric: None,
+                min_wal_sequence: None,
+                ann_params: Default::default(),
+                group_by: None,
+                filters: Some(FilterExpr::Eq {
+                    field: "category".to_string(),
+                    value: json!("news"),
+                }),
+                filter_bitmap_ids: None,
+            })
+            .await
+            .expect("filtered query");
+
+        assert_eq!(response.hits.len(), 1);
+        assert_eq!(response.hits[0].id, "doc-1");
+    }
+
+    #[tokio::test]
+    async fn filter_bitmap_intersection_limits_candidates() {
+        let store = sample_store();
+        let registry = NamespaceRegistry::new(store);
+        let docs = vec![
+            Document {
+                id: "doc-1".to_string(),
+                vector: Some(vec![1.0, 0.0]),
+                attributes: Some(json!({ "category": "news" })),
+            },
+            Document {
+                id: "doc-2".to_string(),
+                vector: Some(vec![0.0, 1.0]),
+                attributes: Some(json!({ "category": "news" })),
+            },
+            Document {
+                id: "doc-3".to_string(),
+                vector: Some(vec![0.0, -1.0]),
+                attributes: Some(json!({ "category": "sports" })),
+            },
+        ];
+
+        registry
+            .apply_write(WriteBatch {
+                namespace: "ns".to_string(),
+                upserts: docs,
+                deletes: Vec::new(),
+            })
+            .await
+            .expect("seed docs");
+
+        let response = registry
+            .query(QueryRequest {
+                namespace: "ns".to_string(),
+                vector: vec![0.0, 1.0],
+                top_k: 3,
+                metric: None,
+                min_wal_sequence: None,
+                ann_params: Default::default(),
+                group_by: None,
+                filters: Some(FilterExpr::Eq {
+                    field: "category".to_string(),
+                    value: json!("news"),
+                }),
+                filter_bitmap_ids: Some(vec!["doc-2".to_string()]),
+            })
+            .await
+            .expect("bitmap filtered query");
+
+        assert_eq!(response.hits.len(), 1);
+        assert_eq!(response.hits[0].id, "doc-2");
     }
 }
