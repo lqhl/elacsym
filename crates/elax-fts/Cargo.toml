@@ -8,4 +8,9 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
 tantivy = { version = "0.21", default-features = false, features = ["mmap", "stopwords", "lz4-compression"] }
+serde_with = "3"
+
+[dev-dependencies]
+serde_json = "1"

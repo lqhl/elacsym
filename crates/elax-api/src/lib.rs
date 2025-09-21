@@ -11,8 +11,8 @@ use axum::{
     Json, Router,
 };
 use elax_core::{
-    AnnParams, DistanceMetric, NamespaceRegistry, QueryRequest, QueryResponse, RecallRequest,
-    RecallResponse, WriteBatch,
+    AnnParams, DistanceMetric, GroupBy, NamespaceRegistry, QueryRequest, QueryResponse,
+    RecallRequest, RecallResponse, WriteBatch,
 };
 use elax_store::{Document, LocalStore};
 use metrics::counter;
@@ -132,6 +132,7 @@ async fn handle_query(
         metric: payload.metric,
         min_wal_sequence: payload.min_wal_sequence,
         ann_params: payload.ann_params,
+        group_by: payload.group_by,
     };
 
     match registry.query(request).await {
@@ -249,6 +250,8 @@ struct QueryPayload {
     min_wal_sequence: Option<u64>,
     #[serde(default)]
     ann_params: AnnParams,
+    #[serde(default)]
+    group_by: Option<GroupBy>,
 }
 
 #[derive(Debug, Deserialize)]

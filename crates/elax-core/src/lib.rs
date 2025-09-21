@@ -171,7 +171,11 @@ impl NamespaceState {
         }
 
         let results = guard.search(&request)?;
-        Ok(QueryResponse { hits: results })
+        let groups = guard.group_hits(&results, request.group_by.as_ref());
+        Ok(QueryResponse {
+            hits: results,
+            groups,
+        })
     }
 
     async fn debug_recall(&self, request: RecallRequest) -> Result<RecallResponse> {
@@ -253,6 +257,44 @@ impl NamespaceInner {
         results.sort_by(compare_hits);
         results.truncate(request.top_k);
         Ok(results)
+    }
+
+    fn group_hits(
+        &self,
+        hits: &[QueryHit],
+        group_by: Option<&GroupBy>,
+    ) -> Option<Vec<GroupAggregation>> {
+        let config = group_by?;
+        if hits.is_empty() || config.limit == 0 {
+            return None;
+        }
+
+        let mut groups: HashMap<String, GroupAccumulator> = HashMap::new();
+        for hit in hits {
+            let Some(row) = self.rows.get(&hit.id) else {
+                continue;
+            };
+            let Some(attrs) = row.attributes.as_ref() else {
+                continue;
+            };
+            let Some(group_value) = extract_group_value(attrs, &config.field) else {
+                continue;
+            };
+            let entry = groups
+                .entry(group_value.clone())
+                .or_insert_with(|| GroupAccumulator::new(group_value.clone()));
+            entry.observe(hit.clone(), config.per_group_limit);
+        }
+
+        if groups.is_empty() {
+            return None;
+        }
+
+        let mut aggregations: Vec<GroupAggregation> =
+            groups.into_values().map(GroupAggregation::from).collect();
+        aggregations.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.value.cmp(&b.value)));
+        aggregations.truncate(config.limit);
+        Some(aggregations)
     }
 
     fn ensure_ivf(&mut self, metric: DistanceMetric, ann: &AnnParams) -> Result<()> {
@@ -837,12 +879,116 @@ pub struct QueryRequest {
     pub min_wal_sequence: Option<u64>,
     #[serde(default)]
     pub ann_params: AnnParams,
+    #[serde(default)]
+    pub group_by: Option<GroupBy>,
 }
 
 /// Query response containing scored hits.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueryResponse {
     pub hits: Vec<QueryHit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<GroupAggregation>>,
+}
+
+/// Configuration describing how to group query hits.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupBy {
+    /// Dot-delimited path to the attribute used for grouping.
+    pub field: String,
+    /// Maximum number of groups to return. Defaults to 10.
+    #[serde(default = "GroupBy::default_group_limit")]
+    pub limit: usize,
+    /// Maximum number of representative hits to retain per group. Defaults to 1.
+    #[serde(default = "GroupBy::default_per_group_limit")]
+    pub per_group_limit: usize,
+}
+
+impl GroupBy {
+    fn default_group_limit() -> usize {
+        10
+    }
+
+    fn default_per_group_limit() -> usize {
+        1
+    }
+}
+
+/// Aggregated view of hits that share the same grouping value.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroupAggregation {
+    /// Group value extracted from the hit attributes.
+    pub value: String,
+    /// Total number of hits observed for this group.
+    pub count: usize,
+    /// Representative hits (ordered) retained for the group.
+    pub hits: Vec<QueryHit>,
+}
+
+#[derive(Clone, Debug)]
+struct GroupAccumulator {
+    value: String,
+    count: usize,
+    hits: Vec<QueryHit>,
+}
+
+impl GroupAccumulator {
+    fn new(value: String) -> Self {
+        Self {
+            value,
+            count: 0,
+            hits: Vec::new(),
+        }
+    }
+
+    fn observe(&mut self, hit: QueryHit, per_group_limit: usize) {
+        self.count += 1;
+        if per_group_limit == 0 {
+            return;
+        }
+        if self.hits.len() < per_group_limit {
+            self.hits.push(hit);
+        }
+    }
+}
+
+impl From<GroupAccumulator> for GroupAggregation {
+    fn from(accumulator: GroupAccumulator) -> Self {
+        Self {
+            value: accumulator.value,
+            count: accumulator.count,
+            hits: accumulator.hits,
+        }
+    }
+}
+
+fn extract_group_value(value: &serde_json::Value, field: &str) -> Option<String> {
+    if field.is_empty() {
+        return None;
+    }
+    let mut current = value;
+    for segment in field.split('.') {
+        if segment.is_empty() {
+            return None;
+        }
+        match current {
+            serde_json::Value::Object(map) => {
+                current = map.get(segment)?;
+            }
+            serde_json::Value::Array(items) => {
+                let index: usize = segment.parse().ok()?;
+                current = items.get(index)?;
+            }
+            _ => return None,
+        }
+    }
+
+    match current {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(num) => Some(num.to_string()),
+        serde_json::Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -898,6 +1044,7 @@ impl RecallResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn sample_store() -> LocalStore {
         let mut path = std::env::temp_dir();
@@ -950,6 +1097,7 @@ mod tests {
                 metric: None,
                 min_wal_sequence: Some(pointer.sequence),
                 ann_params: Default::default(),
+                group_by: None,
             })
             .await
             .expect("query");
@@ -986,6 +1134,7 @@ mod tests {
                 metric: None,
                 min_wal_sequence: None,
                 ann_params: Default::default(),
+                group_by: None,
             })
             .await
             .expect("query");
@@ -1028,6 +1177,7 @@ mod tests {
                     nprobe: Some(1),
                     ..Default::default()
                 },
+                group_by: None,
             })
             .await
             .expect("query");
@@ -1060,6 +1210,7 @@ mod tests {
                 metric: None,
                 min_wal_sequence: Some(pointer.sequence + 1),
                 ann_params: Default::default(),
+                group_by: None,
             })
             .await
             .expect_err("consistency requirement should fail");
@@ -1100,6 +1251,7 @@ mod tests {
                 metric: None,
                 min_wal_sequence: Some(second_pointer.sequence),
                 ann_params: Default::default(),
+                group_by: None,
             })
             .await
             .expect("query should reload WAL");
@@ -1138,12 +1290,75 @@ mod tests {
                     use_ivf: false,
                     ..Default::default()
                 },
+                group_by: None,
             })
             .await
             .expect("brute-force query");
 
         assert_eq!(response.hits.len(), 1);
         assert_eq!(response.hits[0].id, "doc-15");
+    }
+
+    #[tokio::test]
+    async fn group_by_aggregates_hits_by_attribute() {
+        let store = sample_store();
+        let registry = NamespaceRegistry::new(store);
+        let docs = vec![
+            Document {
+                id: "doc-1".to_string(),
+                vector: Some(vec![1.0, 0.0]),
+                attributes: Some(json!({ "category": "news" })),
+            },
+            Document {
+                id: "doc-2".to_string(),
+                vector: Some(vec![0.9, 0.1]),
+                attributes: Some(json!({ "category": "news" })),
+            },
+            Document {
+                id: "doc-3".to_string(),
+                vector: Some(vec![-1.0, 0.0]),
+                attributes: Some(json!({ "category": "sports" })),
+            },
+        ];
+
+        registry
+            .apply_write(WriteBatch {
+                namespace: "ns".to_string(),
+                upserts: docs,
+                deletes: Vec::new(),
+            })
+            .await
+            .expect("seed documents");
+
+        let response = registry
+            .query(QueryRequest {
+                namespace: "ns".to_string(),
+                vector: vec![1.0, 0.0],
+                top_k: 3,
+                metric: None,
+                min_wal_sequence: None,
+                ann_params: Default::default(),
+                group_by: Some(GroupBy {
+                    field: "category".to_string(),
+                    limit: 5,
+                    per_group_limit: 2,
+                }),
+            })
+            .await
+            .expect("grouped query");
+
+        let groups = response.groups.expect("expected groups");
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].value, "news");
+        assert_eq!(groups[0].count, 2);
+        assert_eq!(groups[0].hits.len(), 2);
+        assert!(groups[0].hits.iter().any(|hit| hit.id == "doc-1"));
+        assert!(groups[0].hits.iter().any(|hit| hit.id == "doc-2"));
+
+        assert_eq!(groups[1].value, "sports");
+        assert_eq!(groups[1].count, 1);
+        assert_eq!(groups[1].hits.len(), 1);
+        assert_eq!(groups[1].hits[0].id, "doc-3");
     }
 
     #[tokio::test]

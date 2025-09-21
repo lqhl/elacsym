@@ -130,7 +130,7 @@ s3://{org}/{namespace}/
   * **IVF training** on samples; store centroids.
   * Encode vectors with **ERQ-y** (default 8-bit) once; derive **ERQ-x** bits (default 1-bit) for scan.
   * Build postings per centroid list with contiguous **y-code slabs** + **docID map**.
-* **FTS**: leverage **Tantivy** to build BM25 postings, norms, and dictionaries per configured attribute; persist Tantivy segments alongside part metadata.
+* **FTS**: leverage **Tantivy** to build BM25 postings, norms, and dictionaries per configured attribute; persist Tantivy segments alongside part metadata. `elax-fts` now exposes `LanguagePack` helpers so namespaces can register multiple analyzers (English, French, German, Spanish, Portuguese, Italian, Dutch, Danish, Finnish, Hungarian, Norwegian, Swedish, Russian, Romanian, Turkish, Arabic, Tamil, Greek) with shared defaults (lowercasing, ASCII folding, stemming, stop-word removal). `LanguagePackConfig` provides a serde-friendly representation so deployment configs can reference analyzers by ISO code (`"fr"`) and override tunables (`nostem`, `nostop`, custom token length) before mapping them into schema builders.
 * **Filters**: build roaring/range indexes for filterable attributes.
 * **Router publish**: write new part, update `router.json` (epoch++), GC old parts eventually.
 
