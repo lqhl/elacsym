@@ -736,6 +736,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "elax-cache",
+ "futures",
  "object_store",
  "ownedbytes",
  "serde",

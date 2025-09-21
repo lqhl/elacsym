@@ -9,6 +9,7 @@ use std::{
 use anyhow::Error as AnyhowError;
 use bytes::Bytes;
 use elax_cache::{AssetKind, Cache, CacheKey};
+use futures::executor::block_on;
 use object_store::{path::Path as ObjectPath, Error as ObjectStoreError, ObjectStore};
 use ownedbytes::StableDeref;
 use tantivy::directory::error::{DeleteError, OpenReadError, OpenWriteError};
@@ -17,7 +18,8 @@ use tantivy::directory::{
     WatchHandle, WritePtr,
 };
 use tantivy::{Directory, HasLen, Result as TantivyResult};
-use tokio::runtime::Handle;
+use tokio::runtime::Runtime;
+use tokio::task::JoinError;
 
 /// Tantivy [`Directory`] that materializes files from an [`ObjectStore`] and keeps hot segments in
 /// the NVMe-backed [`Cache`].
@@ -27,7 +29,7 @@ pub struct ObjectStoreDirectory {
     root: ObjectPath,
     cache: Arc<Cache>,
     namespace: String,
-    runtime: Handle,
+    runtime: Arc<Runtime>,
     watchers: Arc<WatchCallbackList>,
 }
 
@@ -38,7 +40,7 @@ impl ObjectStoreDirectory {
         root: ObjectPath,
         cache: Arc<Cache>,
         namespace: impl Into<String>,
-        runtime: Handle,
+        runtime: Arc<Runtime>,
     ) -> Self {
         Self {
             store,
@@ -79,13 +81,16 @@ impl ObjectStoreDirectory {
         }
 
         let object_path = self.object_path(path);
-        let get_result = self
-            .runtime
-            .block_on(self.store.get(&object_path))
-            .map_err(|err| map_object_error(path, err))?;
-        let bytes = self
-            .runtime
-            .block_on(get_result.bytes())
+        let store = self.store.clone();
+        let object_path_clone = object_path.clone();
+        let get_result = block_on(
+            self.runtime
+                .spawn(async move { store.get(&object_path_clone).await }),
+        )
+        .map_err(|err| map_join_error(path, err))?
+        .map_err(|err| map_object_error(path, err))?;
+        let bytes = block_on(self.runtime.spawn(async move { get_result.bytes().await }))
+            .map_err(|err| map_join_error(path, err))?
             .map_err(|err| map_object_error(path, err))?;
         let arc = Arc::new(bytes.to_vec());
         self.cache
@@ -97,9 +102,14 @@ impl ObjectStoreDirectory {
     fn store_bytes(&self, path: &Path, data: &[u8]) -> io::Result<()> {
         let object_path = self.object_path(path);
         let payload = Bytes::copy_from_slice(data);
-        self.runtime
-            .block_on(self.store.put(&object_path, payload))
-            .map_err(object_error_to_io)
+        let store = self.store.clone();
+        let object_path_clone = object_path.clone();
+        let result = block_on(
+            self.runtime
+                .spawn(async move { store.put(&object_path_clone, payload).await }),
+        )
+        .map_err(join_error_to_io)?;
+        result.map_err(object_error_to_io)
     }
 
     fn populate_cache(&self, path: &Path, data: Vec<u8>) -> io::Result<()> {
@@ -116,7 +126,14 @@ impl Directory for ObjectStoreDirectory {
 
     fn delete(&self, path: &Path) -> Result<(), DeleteError> {
         let object_path = self.object_path(path);
-        match self.runtime.block_on(self.store.delete(&object_path)) {
+        let store = self.store.clone();
+        let object_path_clone = object_path.clone();
+        let result = block_on(
+            self.runtime
+                .spawn(async move { store.delete(&object_path_clone).await }),
+        )
+        .map_err(|err| map_join_error_delete(path, err))?;
+        match result {
             Ok(_) => {}
             Err(ObjectStoreError::NotFound { .. }) => {
                 return Err(DeleteError::FileDoesNotExist(path.to_path_buf()));
@@ -142,7 +159,14 @@ impl Directory for ObjectStoreDirectory {
 
     fn exists(&self, path: &Path) -> Result<bool, OpenReadError> {
         let object_path = self.object_path(path);
-        match self.runtime.block_on(self.store.head(&object_path)) {
+        let store = self.store.clone();
+        let object_path_clone = object_path.clone();
+        let result = block_on(
+            self.runtime
+                .spawn(async move { store.head(&object_path_clone).await }),
+        )
+        .map_err(|err| map_join_error(path, err))?;
+        match result {
             Ok(_) => Ok(true),
             Err(ObjectStoreError::NotFound { .. }) => Ok(false),
             Err(err) => Err(OpenReadError::wrap_io_error(
@@ -277,6 +301,17 @@ fn map_object_error(path: &Path, err: ObjectStoreError) -> OpenReadError {
     }
 }
 
+fn map_join_error(path: &Path, err: JoinError) -> OpenReadError {
+    OpenReadError::wrap_io_error(join_error_to_io(err), path.to_path_buf())
+}
+
+fn map_join_error_delete(path: &Path, err: JoinError) -> DeleteError {
+    DeleteError::IoError {
+        io_error: Arc::new(join_error_to_io(err)),
+        filepath: path.to_path_buf(),
+    }
+}
+
 fn object_error_to_io(err: ObjectStoreError) -> io::Error {
     match err {
         ObjectStoreError::NotFound { .. } => {
@@ -291,6 +326,10 @@ fn anyhow_to_io(err: AnyhowError) -> io::Error {
         Ok(io_err) => io_err,
         Err(other) => io::Error::other(other.to_string()),
     }
+}
+
+fn join_error_to_io(err: JoinError) -> io::Error {
+    io::Error::other(err.to_string())
 }
 
 fn open_read_to_io(err: OpenReadError) -> io::Error {
@@ -317,12 +356,17 @@ mod tests {
 
     fn test_directory(
         namespace: &str,
-    ) -> (ObjectStoreDirectory, Arc<Cache>, tokio::runtime::Runtime) {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let handle = runtime.handle().clone();
+    ) -> (
+        ObjectStoreDirectory,
+        Arc<Cache>,
+        Arc<tokio::runtime::Runtime>,
+    ) {
+        let runtime = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("runtime"),
+        );
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let temp = TempDir::new().expect("tempdir");
         let cache = Arc::new(
@@ -333,7 +377,7 @@ mod tests {
             ObjectPath::from("parts/part-1/fts"),
             cache.clone(),
             namespace,
-            handle,
+            runtime.clone(),
         );
         (dir, cache, runtime)
     }
@@ -396,5 +440,20 @@ mod tests {
         dir.atomic_write(Path::new("meta.json"), b"v2").unwrap();
         assert_eq!(counter.load(Ordering::SeqCst), 2);
         drop(handle);
+    }
+
+    #[test]
+    fn directory_operations_do_not_block_current_runtime() {
+        let (dir, _cache, _object_rt) = test_directory("ns-d");
+        let query_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("query runtime");
+
+        query_rt.block_on(async move {
+            dir.atomic_write(Path::new("meta.json"), b"async").unwrap();
+            let bytes = dir.atomic_read(Path::new("meta.json")).unwrap();
+            assert_eq!(bytes, b"async");
+        });
     }
 }

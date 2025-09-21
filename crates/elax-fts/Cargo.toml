@@ -16,6 +16,7 @@ object_store = { version = "0.7", default-features = false }
 ownedbytes = "0.6"
 tokio = { version = "1", features = ["rt"] }
 serde_with = "3"
+futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
 
 [dev-dependencies]
 serde_json = "1"
