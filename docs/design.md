@@ -186,6 +186,8 @@ Given `(rank_by, filters, top_k)`:
 * **Recall-aware filtering**: intersect filter bitmaps with IVF candidate sets at list or candidate granularity.
 * Minimizes object-store RTTs by grouping ranged reads per list/part and **prefetching y-code slabs**.
 
+Implementation update: the planner now estimates selectivity via filter bitmap cardinality and candidate budgets, opting for filter-first execution when predicates collapse the candidate set or ANN is disabled, and falling back to vector-first when filters are broad. The core request type accepts serialized filter expressions and optional bitmap handles so query nodes can reuse precomputed intersections.
+
 **Cold path RTT budget** (rule of thumb):
 
 1. Router + metadata read

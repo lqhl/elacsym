@@ -76,8 +76,10 @@ Legend: `TODO` = not started, `DOING` = in progress, `DONE` = complete.
 - Status: DONE — Surface pluggable object-store backends (S3/GCS/local) through configuration and propagate signed PUT/GET usage to the query node and indexer runtimes.
 
 #### Filter-aware query planner
-- Status: TODO — Extend query request types with filter expressions and bitmap handles, then teach the planner to choose vector-first vs. filter-first execution paths with bitmap intersections.
-- Status: TODO — Add cost models and unit tests validating planner selections against synthetic selectivity distributions.
+- Status: DONE — Extend query request types with filter expressions and bitmap handles, then teach the planner to choose vector-first vs. filter-first execution paths with bitmap intersections.
+  - Step: DONE — Outline and plumb filter expressions/bitmap handles through the API surface and core query request types.
+  - Step: DONE — Implement filter evaluation plus planner heuristics that pick vector-first vs. filter-first based on selectivity and candidate budgets.
+  - Step: DONE — Add unit tests covering planner decisions, filter execution, and bitmap intersections on synthetic datasets.
 
 #### Full-text & hybrid search flows
 - Status: TODO — Thread `rank_by`, `filters`, and multi-query payloads through the HTTP surface, core planner, and Tantivy bridge, ensuring hybrid vector+BM25 scoring is validated with integration tests.

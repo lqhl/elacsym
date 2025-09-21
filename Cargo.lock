@@ -651,6 +651,7 @@ dependencies = [
  "anyhow",
  "axum",
  "elax-core",
+ "elax-filter",
  "elax-metrics",
  "elax-store",
  "http-body-util",
@@ -701,6 +702,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "elax-erq",
+ "elax-filter",
  "elax-ivf",
  "elax-metrics",
  "elax-store",
@@ -723,7 +725,8 @@ name = "elax-filter"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "bitflags 2.9.4",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
