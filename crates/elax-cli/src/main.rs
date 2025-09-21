@@ -2,8 +2,9 @@
 
 use std::collections::HashSet;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
+use elax_config::ServiceConfig;
 use elax_indexer::{Indexer, IndexerConfig};
 use elax_store::{LocalStore, WalBatch};
 use serde_json::json;
@@ -39,7 +40,21 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let store = LocalStore::new(&cli.root);
+    let config_path =
+        std::env::var("ELAX_CONFIG").unwrap_or_else(|_| "configs/query-node.toml".to_string());
+    let mut config = ServiceConfig::load(&config_path)
+        .with_context(|| format!("loading config from {config_path}"))?;
+    config.data_root = cli.root.into();
+    config
+        .object_store
+        .resolve_filesystem_root(&config.data_root);
+
+    let mut store = LocalStore::new(&config.data_root);
+    let object_store = config
+        .object_store
+        .build()
+        .context("initializing object-store backend")?;
+    store = store.with_object_store(object_store.store, object_store.prefix);
 
     match cli.command {
         Command::Compact { namespace } => {

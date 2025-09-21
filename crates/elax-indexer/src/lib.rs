@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use elax_store::{LocalStore, PartManifest, RouterState};
+use elax_store::{Document, LocalStore, PartManifest, RouterState, WriteOp};
 use metrics::{counter, histogram};
 
 static PART_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -70,6 +70,8 @@ impl Indexer {
         let mut last_sequence = router.indexed_wal;
         let mut bucket_rows = 0usize;
         let mut bucket_start: Option<u64> = None;
+        let mut bucket_docs: Vec<Document> = Vec::new();
+        let mut bucket_deletes: Vec<String> = Vec::new();
 
         for (pointer, batch) in batches.into_iter() {
             processed_batches += 1;
@@ -77,34 +79,57 @@ impl Indexer {
                 continue;
             }
             last_sequence = pointer.sequence;
-            bucket_rows += batch.operations.len();
             if bucket_start.is_none() {
                 bucket_start = Some(pointer.sequence);
             }
+            for op in batch.operations {
+                match op {
+                    WriteOp::Upsert { document } => {
+                        bucket_rows += 1;
+                        bucket_docs.push(document);
+                    }
+                    WriteOp::Delete { id } => {
+                        bucket_deletes.push(id);
+                    }
+                }
+            }
             if bucket_rows >= self.config.rows_per_part {
-                let manifest = self
+                let start = bucket_start.unwrap_or(pointer.sequence);
+                if let Some(manifest) = self
                     .flush_part(
                         namespace,
                         &ns_store,
-                        bucket_start.unwrap_or(pointer.sequence),
+                        start,
                         pointer.sequence,
-                        bucket_rows,
+                        std::mem::take(&mut bucket_docs),
+                        std::mem::take(&mut bucket_deletes),
                     )
-                    .await?;
-                parts_created += 1;
-                router.parts.push(manifest);
+                    .await?
+                {
+                    parts_created += 1;
+                    router.parts.push(manifest);
+                }
                 bucket_rows = 0;
                 bucket_start = None;
             }
         }
 
-        if bucket_rows > 0 {
+        if bucket_rows > 0 || !bucket_deletes.is_empty() {
             let start_seq = bucket_start.unwrap_or(last_sequence.max(router.indexed_wal));
-            let manifest = self
-                .flush_part(namespace, &ns_store, start_seq, last_sequence, bucket_rows)
-                .await?;
-            parts_created += 1;
-            router.parts.push(manifest);
+            if let Some(manifest) = self
+                .flush_part(
+                    namespace,
+                    &ns_store,
+                    start_seq,
+                    last_sequence,
+                    bucket_docs,
+                    bucket_deletes,
+                )
+                .await?
+            {
+                parts_created += 1;
+                router.parts.push(manifest);
+            }
         }
 
         let mut router_dirty = false;
@@ -165,9 +190,18 @@ impl Indexer {
         ns_store: &elax_store::NamespaceStore,
         wal_start: u64,
         wal_end: u64,
-        rows: usize,
-    ) -> Result<PartManifest> {
-        let manifest = PartManifest::new(new_part_id(namespace), wal_start, wal_end, rows);
+        documents: Vec<Document>,
+        deletes: Vec<String>,
+    ) -> Result<Option<PartManifest>> {
+        if documents.is_empty() && deletes.is_empty() {
+            return Ok(None);
+        }
+        let mut manifest =
+            PartManifest::new(new_part_id(namespace), wal_start, wal_end, documents.len());
+        ns_store
+            .write_part_assets(&manifest.id, &documents, &deletes)
+            .await?;
+        manifest.tombstones = deletes.len();
         ns_store.write_part_manifest(&manifest).await?;
         counter!(
             "elax_indexer_parts_total",
@@ -175,7 +209,7 @@ impl Indexer {
             "namespace" => namespace.to_string(),
             "stage" => "materialize"
         );
-        Ok(manifest)
+        Ok(Some(manifest))
     }
 
     async fn maybe_compact(
@@ -189,7 +223,17 @@ impl Indexer {
         }
         let mut parts = router.parts.clone();
         parts.sort_by_key(|p| p.wal_start);
-        let merged_rows: usize = parts.iter().map(|p| p.rows).sum();
+        let mut merged_docs = Vec::new();
+        let mut merged_deletes = Vec::new();
+        for part in &parts {
+            let (mut docs, mut deletes) = ns_store
+                .read_part_assets(&part.id)
+                .await
+                .with_context(|| format!("reading part assets for {}", part.id))?;
+            merged_docs.append(&mut docs);
+            merged_deletes.append(&mut deletes);
+        }
+        let merged_rows: usize = merged_docs.len();
         let merged_start = parts.first().map(|p| p.wal_start).unwrap_or(0);
         let merged_end = parts
             .last()
@@ -202,6 +246,10 @@ impl Indexer {
             merged_rows,
         );
         merged.compacted_from = parts.iter().map(|p| p.id.clone()).collect();
+        merged.tombstones = merged_deletes.len();
+        ns_store
+            .write_part_assets(&merged.id, &merged_docs, &merged_deletes)
+            .await?;
         ns_store.write_part_manifest(&merged).await?;
         for part in &parts {
             ns_store.remove_part_manifest(&part.id).await.ok();
@@ -292,7 +340,59 @@ mod tests {
         assert!(result.router.indexed_wal >= 2);
         let manifests = ns.list_part_manifests().await.expect("list parts");
         assert!(!manifests.is_empty());
+        let manifest = &manifests[0];
+        assert_eq!(manifest.tombstones, 0);
+        let (docs, deletes) = ns
+            .read_part_assets(&manifest.id)
+            .await
+            .expect("read materialized part");
+        assert_eq!(docs.len(), manifest.rows);
+        assert!(deletes.is_empty());
         drop(dir);
+    }
+
+    #[tokio::test]
+    async fn materialize_records_tombstones() {
+        let (_dir, store) = temp_store();
+        let ns = store.namespace("ns");
+        let batch = WalBatch {
+            namespace: "ns".to_string(),
+            operations: vec![
+                WriteOp::Upsert {
+                    document: Document {
+                        id: "doc-keep".to_string(),
+                        vector: Some(vec![1.0]),
+                        attributes: None,
+                    },
+                },
+                WriteOp::Delete {
+                    id: "doc-drop".to_string(),
+                },
+            ],
+        };
+        ns.append_batch(&batch)
+            .await
+            .expect("append batch with delete");
+
+        let indexer = Indexer::new(
+            store.clone(),
+            IndexerConfig {
+                rows_per_part: 8,
+                max_active_parts: 4,
+            },
+        );
+        let router = indexer.run_until_idle("ns").await.expect("run indexer");
+        assert_eq!(router.parts.len(), 1);
+        let manifest = &router.parts[0];
+        assert_eq!(manifest.rows, 1);
+        assert_eq!(manifest.tombstones, 1);
+        let (docs, deletes) = ns
+            .read_part_assets(&manifest.id)
+            .await
+            .expect("load part assets");
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].id, "doc-keep");
+        assert_eq!(deletes, vec!["doc-drop".to_string()]);
     }
 
     #[tokio::test]
@@ -314,5 +414,12 @@ mod tests {
         let result = indexer.run_until_idle("ns").await.expect("run indexer");
         assert_eq!(result.parts.len(), 1);
         assert!(result.parts[0].compacted_from.len() >= 2);
+        assert_eq!(result.parts[0].rows, 24);
+        let (docs, deletes) = ns
+            .read_part_assets(&result.parts[0].id)
+            .await
+            .expect("read compacted part");
+        assert_eq!(docs.len(), result.parts[0].rows);
+        assert!(deletes.is_empty());
     }
 }

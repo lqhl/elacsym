@@ -64,7 +64,29 @@ Legend: `TODO` = not started, `DOING` = in progress, `DONE` = complete.
 - Status: DONE — Publish operational runbooks in `docs/runbooks/` for cache pinning, backfill, and recall drift remediation.
 
 ### Cross-Cutting Workstreams
-- Status: TODO — Set up CI jobs enforcing `cargo fmt --all`, `cargo clippy --all-targets --all-features -D warnings`, and `cargo test --workspace`.
-- Status: TODO — Add property tests (e.g., `proptest`) for WAL ordering/recovery and ERQ distance estimates vs FP32 ground truth.
-- Status: TODO — Keep `docs/design.md` and sample configs updated as features land; capture architecture impacts in PR templates.
-- Status: TODO — Prototype Tantivy object-store directory + NVMe cache layer and document operational considerations.
+- Status: DONE — Set up CI jobs enforcing `cargo fmt --all`, `cargo clippy --all-targets --all-features -D warnings`, and `cargo test --workspace`.
+- Status: DONE — Add property tests (`proptest`) for WAL ordering/recovery and ERQ distance estimates vs FP32 ground truth.
+- Status: DONE — Keep `docs/design.md` and sample configs updated as features land; capture architecture impacts in PR templates (see `.github/pull_request_template.md` and `configs/`).
+- Status: DONE — Prototype Tantivy object-store directory + NVMe cache layer and document operational considerations.
+
+### Outstanding Implementation Backlog
+
+#### Object-storage-first layout & part materialization
+- Status: DONE — Replaced the local-only namespace store with an object-storage-aware materializer that writes Parquet row slabs, tombstone catalogs, and IVF metadata into the part prefix, wired compaction to merge assets, and added regression tests covering round-trip decoding.
+- Status: DONE — Surface pluggable object-store backends (S3/GCS/local) through configuration and propagate signed PUT/GET usage to the query node and indexer runtimes.
+
+#### Filter-aware query planner
+- Status: TODO — Extend query request types with filter expressions and bitmap handles, then teach the planner to choose vector-first vs. filter-first execution paths with bitmap intersections.
+- Status: TODO — Add cost models and unit tests validating planner selections against synthetic selectivity distributions.
+
+#### Full-text & hybrid search flows
+- Status: TODO — Thread `rank_by`, `filters`, and multi-query payloads through the HTTP surface, core planner, and Tantivy bridge, ensuring hybrid vector+BM25 scoring is validated with integration tests.
+
+#### Write/consistency features
+- Status: TODO — Implement patch/upsert columns, conditional writes, and delete-by-filter semantics in the write API while surfacing eventual-consistency toggles on the query path.
+
+#### Metadata & admin endpoints
+- Status: TODO — Add namespace enumeration, schema retrieval, cache warm hints, and recall evaluation endpoints to the API server backed by store lookups and operational runbooks.
+
+#### Namespace schema & advanced ERQ capabilities
+- Status: TODO — Persist namespace schemas (attribute types, distance metric, analyzers) and extend the ERQ crate with codebook learning, residual coding, and SIMD kernel dispatch validated by property tests.

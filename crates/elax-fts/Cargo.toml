@@ -7,10 +7,16 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bytes = "1"
+elax-cache = { path = "../elax-cache" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 tantivy = { version = "0.21", default-features = false, features = ["mmap", "stopwords", "lz4-compression"] }
+object_store = { version = "0.7", default-features = false }
+ownedbytes = "0.6"
+tokio = { version = "1", features = ["rt"] }
 serde_with = "3"
 
 [dev-dependencies]
 serde_json = "1"
+tempfile = "3"

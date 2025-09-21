@@ -8,6 +8,7 @@ Prototype workspace for the elacsym search engine described in `docs/design.md`.
 - `bin/`: binary crates such as the `query-node` service.
 - `tests/`: integration and property test harnesses (placeholder).
 - `docs/`: design documents, runbooks, and architecture notes.
+- `configs/`: sample TOML configs kept in sync with design defaults.
 
 ## Prerequisites
 

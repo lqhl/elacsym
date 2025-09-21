@@ -134,6 +134,8 @@ s3://{org}/{namespace}/
 * **Filters**: build roaring/range indexes for filterable attributes.
 * **Router publish**: write new part, update `router.json` (epoch++), GC old parts eventually.
 
+**Implementation status**: the indexer now materializes part directories in object storage by writing `segment/rows.parquet` slabs (Arrow → Parquet with Zstd), persisting tombstone catalogs, and emitting placeholder IVF metadata so cached nodes can hydrate without rereading the WAL. Compaction replays existing part assets to form merged Parquet outputs before retiring source manifests.
+
 **Compaction**: heuristics on part count/size; re-cluster lists; re-encode (no re-train unless drift).
 
 ---
@@ -209,6 +211,14 @@ integration pattern from the upstream [basic search example](https://tantivy-sea
   `parts/<part_id>/fts/tantivy/`. Query nodes mount the same object-store directory through a read-only Tantivy `Index`, caching
   hot segments on NVMe for low-latency reopen operations. The wrapper guarantees the identifier field is persisted so search hits
   can round-trip back into hybrid planning.
+* **Object-store directory**: the `ObjectStoreDirectory` prototype wraps an `object_store::ObjectStore` client and the shared
+  `elax-cache` NVMe slab. Reads opportunistically hydrate the cache and subsequent handles serve from memory; deletes tear down
+  both the object and any cached blobs. Synchronous flushes upload the full byte slice so Tantivy reloads never observe partial
+  segments.
+* **Operational considerations**: `atomic_write` broadcasts `meta.json` updates to reload watchers, so query nodes immediately
+  reopen after part commits. Cache eviction respects namespace pinning for dedicated FTS tiers, and NVMe warms opportunistically
+  as query nodes fetch segment handles. Operators should budget for object-store PUT latency on flush and provision NVMe large
+  enough to retain the hottest segment sets plus spillover headroom.
 * **Commit & reload**: indexers commit after flushing each part. Query nodes open readers with `ReloadPolicy::OnCommit`, mirroring
   Tantivy's recommended pattern and avoiding bespoke invalidation wiring.
 * **Query execution**: `TantivyIndex::search` wraps a `QueryParser`, applies field boosts declared in the schema, and executes the
@@ -429,6 +439,8 @@ pub trait Index {
 * **Container**: distroless + musl possible; AVX/NEON builds per arch.
 * **Deploy**: Helm charts; indexers auto-scale on backlog; query nodes scale on QPS.
 * **Metrics**: Prometheus + OpenTelemetry spans; SLO panels (p50/p90/p99, cache hit ratio, RTTs).
+* **Configuration artifacts**: sample configs live in `configs/` (`query-node.sample.toml`, `namespace.sample.toml`); update them alongside this document when defaults or tunables change.
+* **Config loader**: the `elax-config` crate consumes those TOML files (plus `ELAX_*` env overrides) and provisions filesystem, S3, or GCS object-store clients shared by the query node, indexer, and CLI.
 * **GC**: tombstone horizon + retain epochs; background purge of old parts/WAL.
 
 ---
@@ -518,11 +530,20 @@ loop {
 * **Writes**: high throughput, higher latency (object store commit).
 * **Consistency floor**: \~10–20ms for strong reads due to metadata checks; use eventual to go sub-10ms.
 * **Occasional cold queries**: P999 may hit \~100s of ms; warm hints recommended.
+
+---
+
+## 26) Cross-Cutting Workstreams
+
+* **Status: DONE** — Set up CI jobs enforcing `cargo fmt --all`, `cargo clippy --all-targets --all-features -D warnings`, and `cargo test --workspace` via GitHub Actions (`.github/workflows/ci.yml`).
+* **Status: DONE** — Add property tests (`proptest`) covering WAL ordering/recovery and ERQ distance estimates vs FP32 ground truth.
+* **Status: DONE** — Keep `docs/design.md` and sample configs updated as features land; capture architecture impacts in PR templates (PR template now enforces linking updates to architecture notes).
+* **Status: DONE** — Prototype Tantivy object-store directory + NVMe cache layer and document operational considerations.
 * **Graph ANN** is avoided to minimize object-store RTTs & write amplification; IVF fits better.
 
 ---
 
-## 26) Roadmap
+## 27) Roadmap
 
 **Bring-up**
 
@@ -545,7 +566,7 @@ loop {
 
 ---
 
-## 27) Appendix A — Schema Examples
+## 28) Appendix A — Schema Examples
 
 **Enable FTS + vector (f16)**
 
@@ -560,7 +581,7 @@ loop {
 
 ---
 
-## 28) Appendix B — Example Queries
+## 29) Appendix B — Example Queries
 
 **Hybrid multi-query**
 
@@ -589,7 +610,7 @@ loop {
 
 ---
 
-## 29) Appendix C — Operational Runbooks
+## 30) Appendix C — Operational Runbooks
 
 * **Hot namespace pinning**: mark in `router.json: { pin: true }` → cache avoids eviction.
 * **Backfill**: bulk import writes as columnar with `distance_metric` fixed; run indexer in “catch-up” mode.
@@ -601,3 +622,11 @@ loop {
 
 * Implement ERQ per paper spec with: (1) training for codebooks at multiple bit-budgets; (2) quantization consistent across x,y; (3) distance estimators that share LUTs to minimize per-candidate FLOPs.
 * Provide `erq-ffi` feature that optionally links against the reference **C++ RaBitQ Library** for validation tests and A/B kernels; default path is **pure Rust**.
+* Ensure runtime dispatch picks the highest available SIMD level while keeping a scalar fallback for portability.
+
+---
+
+## 31) Contribution Workflow
+
+* `.github/pull_request_template.md` records summary, testing evidence, and a dedicated section for architecture/design impacts. Link to updated sections of `docs/design.md` or runbooks when behavior or tunables change.
+* Update the sample configuration files in `configs/` whenever defaults shift so new operators can bootstrap clusters without reverse-engineering code-level values.

@@ -11,3 +11,4 @@ anyhow = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 elax-api = { path = "../../crates/elax-api" }
 elax-store = { path = "../../crates/elax-store" }
+elax-config = { path = "../../crates/elax-config" }

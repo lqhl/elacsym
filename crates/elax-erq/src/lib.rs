@@ -256,6 +256,7 @@ fn euclidean_squared(a: &[f32], b: &[f32]) -> Result<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn train_and_encode_round_trips_reasonably() {
@@ -309,5 +310,60 @@ mod tests {
             .fine_distance(&[1.0, 1.0], &encoded, DistanceMetric::Cosine)
             .expect("distance");
         assert!(dist.abs() <= 1e-6);
+    }
+
+    proptest! {
+        #[test]
+        fn fine_distance_stays_close_to_training_vectors(
+            (dim, samples) in (1usize..6).prop_flat_map(|dim| {
+                let sample = prop::collection::vec(-5.0f32..5.0, dim);
+                prop::collection::vec(sample, 2..8).prop_map(move |samples| (dim, samples))
+            })
+        ) {
+            let model = train(&samples, TrainConfig::default()).expect("train");
+            prop_assert_eq!(model.dimension(), dim);
+
+            let fine_levels = (1u32 << model.fine_bits()) as f32;
+            let mut max_error = 0.0f32;
+            for idx in 0..model.dimension() {
+                let range = model.maxs[idx] - model.mins[idx];
+                if range <= 0.0 {
+                    continue;
+                }
+                let step = range / (fine_levels - 1.0);
+                max_error += (step * 0.5).powi(2);
+            }
+
+            let cosine_slack = 2e-2f32;
+            for sample in &samples {
+                let norm = sample
+                    .iter()
+                    .map(|v| v.powi(2))
+                    .sum::<f32>()
+                    .sqrt();
+                if norm <= 1e-2 {
+                    continue;
+                }
+                let encoded = model.encode(sample).expect("encode");
+                let fine_l2 = model
+                    .fine_distance(sample, &encoded, DistanceMetric::EuclideanSquared)
+                    .expect("fine distance");
+                prop_assert!(fine_l2 <= max_error + 1e-3);
+
+                let coarse_l2 = model
+                    .coarse_distance(sample, encoded.coarse(), DistanceMetric::EuclideanSquared)
+                    .expect("coarse distance");
+                prop_assert!(coarse_l2 + 1e-6 >= fine_l2);
+
+                let fine_cos = model
+                    .fine_distance(sample, &encoded, DistanceMetric::Cosine)
+                    .expect("fine cosine");
+                let coarse_cos = model
+                    .coarse_distance(sample, encoded.coarse(), DistanceMetric::Cosine)
+                    .expect("coarse cosine");
+                prop_assert!(coarse_cos + cosine_slack >= fine_cos);
+                prop_assert!(fine_cos >= -1e-3);
+            }
+        }
     }
 }
