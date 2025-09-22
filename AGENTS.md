@@ -82,7 +82,11 @@ Legend: `TODO` = not started, `DOING` = in progress, `DONE` = complete.
   - Step: DONE — Add unit tests covering planner decisions, filter execution, and bitmap intersections on synthetic datasets.
 
 #### Full-text & hybrid search flows
-- Status: TODO — Thread `rank_by`, `filters`, and multi-query payloads through the HTTP surface, core planner, and Tantivy bridge, ensuring hybrid vector+BM25 scoring is validated with integration tests.
+- Status: DONE — Thread `rank_by`, `filters`, and multi-query payloads through the HTTP surface, core planner, and Tantivy bridge, ensuring hybrid vector+BM25 scoring is validated with integration tests (including base64 vector payload decoding).
+  - Step: DONE — Review `docs/design.md` and existing Phase 1 vector query implementation to map required changes.
+  - Step: DONE — Extend `elax-core` query planner/data types to support BM25 and hybrid candidate flows (including Tantivy index management).
+  - Step: DONE — Update `elax-api` payload handling plus unit/integration tests to exercise BM25-only and hybrid queries.
+  - Step: DONE — Run `cargo fmt`, `cargo clippy --all-targets --all-features -D warnings`, and `cargo test --workspace` to validate the implementation.
 
 #### Write/consistency features
 - Status: TODO — Implement patch/upsert columns, conditional writes, and delete-by-filter semantics in the write API while surfacing eventual-consistency toggles on the query path.

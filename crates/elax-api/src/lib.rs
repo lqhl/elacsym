@@ -11,8 +11,8 @@ use axum::{
     Json, Router,
 };
 use elax_core::{
-    AnnParams, DistanceMetric, GroupBy, NamespaceRegistry, QueryRequest, QueryResponse,
-    RecallRequest, RecallResponse, WriteBatch,
+    AnnParams, DistanceMetric, GroupBy, NamespaceRegistry, QueryClause, QueryRequest,
+    QueryResponse, RankBy, RecallRequest, RecallResponse, WriteBatch,
 };
 use elax_filter::FilterExpr;
 use elax_store::{Document, LocalStore};
@@ -126,10 +126,18 @@ async fn handle_query(
     Json(payload): Json<QueryPayload>,
 ) -> Result<Json<QueryResponse>, ApiError> {
     const ROUTE: &str = "query";
+    let mut rank_by = payload.rank_by;
+    if rank_by.is_none() {
+        if let Some(vector) = payload.vector {
+            rank_by = Some(RankBy::vector("vector", vector));
+        }
+    }
+
     let request = QueryRequest {
         namespace: namespace.clone(),
-        vector: payload.vector,
         top_k: payload.top_k.unwrap_or(10),
+        rank_by,
+        queries: payload.queries.unwrap_or_default(),
         metric: payload.metric,
         min_wal_sequence: payload.min_wal_sequence,
         ann_params: payload.ann_params,
@@ -244,7 +252,12 @@ impl WriteDocument {
 
 #[derive(Debug, Deserialize)]
 struct QueryPayload {
-    vector: Vec<f32>,
+    #[serde(default)]
+    vector: Option<Vec<f32>>,
+    #[serde(default)]
+    rank_by: Option<RankBy>,
+    #[serde(default)]
+    queries: Option<Vec<QueryClause>>,
     #[serde(default)]
     top_k: Option<usize>,
     #[serde(default)]

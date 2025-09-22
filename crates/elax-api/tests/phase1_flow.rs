@@ -2,6 +2,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use base64::{engine::general_purpose, Engine as _};
 use elax_api::ApiServer;
 use elax_store::LocalStore;
 use http_body_util::BodyExt;
@@ -62,7 +63,7 @@ async fn write_and_query_round_trip() {
     let wal_sequence = write_json["wal_sequence"].as_u64().unwrap();
 
     let query_body = json!({
-        "vector": [1.0, 0.0],
+        "rank_by": ["vector", "ANN", [1.0, 0.0]],
         "top_k": 1,
         "min_wal_sequence": wal_sequence
     });
@@ -89,6 +90,64 @@ async fn write_and_query_round_trip() {
         );
     }
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let hits = value["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["id"], "doc-1");
+}
+
+#[tokio::test]
+async fn query_accepts_base64_ann_payload() {
+    let store = temp_store();
+    let server = ApiServer::new(store);
+    let app = server.router();
+
+    let write_body = json!({
+        "upserts": [
+            { "id": "doc-1", "vector": [1.0, 0.0] },
+            { "id": "doc-2", "vector": [0.0, 1.0] }
+        ]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v2/namespaces/test")
+                .header("content-type", "application/json")
+                .body(Body::from(write_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let mut bytes = Vec::new();
+    for value in [1.0f32, 0.0f32] {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    let encoded = general_purpose::STANDARD.encode(bytes);
+    let query_body = json!({
+        "rank_by": ["vector", "ANN", format!("base64:{encoded}")],
+        "top_k": 1
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v2/namespaces/test/query")
+                .header("content-type", "application/json")
+                .body(Body::from(query_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let hits = value["hits"].as_array().unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0]["id"], "doc-1");
@@ -154,7 +213,7 @@ async fn query_errors_when_consistency_unmet() {
         .unwrap();
 
     let query_body = json!({
-        "vector": [1.0, 0.0],
+        "rank_by": ["vector", "ANN", [1.0, 0.0]],
         "top_k": 1,
         "min_wal_sequence": wal_sequence + 5
     });
@@ -234,6 +293,120 @@ async fn recall_endpoint_reports_full_recall_with_fp32_rerank() {
     assert_eq!(value["evaluated"].as_u64().unwrap(), 5);
     let avg_recall = value["avg_recall"].as_f64().unwrap();
     assert!((avg_recall - 1.0).abs() < 1e-6, "recall should be 1.0");
+}
+
+#[tokio::test]
+async fn bm25_query_returns_hit() {
+    let store = temp_store();
+    let server = ApiServer::new(store);
+    let app = server.router();
+
+    let write_body = json!({
+        "upserts": [
+            { "id": "doc-1", "attributes": { "content": "Rust search engine overview" } },
+            { "id": "doc-2", "attributes": { "content": "Hybrid search primer" } }
+        ]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v2/namespaces/test")
+                .header("content-type", "application/json")
+                .body(Body::from(write_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let query_body = json!({
+        "rank_by": ["content", "BM25", "rust search"],
+        "top_k": 1
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v2/namespaces/test/query")
+                .header("content-type", "application/json")
+                .body(Body::from(query_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let hits = value["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["id"], "doc-1");
+}
+
+#[tokio::test]
+async fn hybrid_query_merges_candidates() {
+    let store = temp_store();
+    let server = ApiServer::new(store);
+    let app = server.router();
+
+    let write_body = json!({
+        "upserts": [
+            {
+                "id": "doc-vec",
+                "vector": [1.0, 0.0],
+                "attributes": { "content": "Rust vector search" }
+            },
+            {
+                "id": "doc-text",
+                "attributes": { "content": "Hybrid search introduction" }
+            }
+        ]
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v2/namespaces/test")
+                .header("content-type", "application/json")
+                .body(Body::from(write_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let query_body = json!({
+        "rank_by": ["vector", "ANN", [1.0, 0.0]],
+        "top_k": 2,
+        "queries": [
+            { "rank_by": ["content", "BM25", "hybrid"], "top_k": 1 }
+        ]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v2/namespaces/test/query")
+                .header("content-type", "application/json")
+                .body(Body::from(query_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let hits = value["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 2);
+    let ids: Vec<_> = hits.iter().map(|hit| hit["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"doc-vec"));
+    assert!(ids.contains(&"doc-text"));
 }
 
 #[tokio::test]

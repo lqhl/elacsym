@@ -2,21 +2,26 @@
 
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
+    convert::TryInto,
     sync::Arc,
     time::Instant,
 };
 
 use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose, Engine as _};
 use elax_erq::{
     self as erq, DistanceMetric as ErqDistanceMetric, EncodedVector as ErqEncodedVector,
     Model as ErqModel, TrainConfig as ErqTrainConfig,
 };
 use elax_filter::{FilterBitmap, FilterExpr};
+use elax_fts::{SchemaConfig, SearchHit as Bm25SearchHit, TantivyIndex, TextFieldConfig};
 use elax_ivf::{self as ivf, IvfModel, TrainParams};
 use elax_store::{Document, LocalStore, NamespaceStore, WalBatch, WalPointer, WriteOp};
+use half::f16;
 use metrics::{counter, gauge, histogram};
-use serde::{Deserialize, Serialize};
+use serde::{de, ser::SerializeTuple, Deserialize, Serialize};
+use tantivy::{schema::Field as TantivyField, Document as TantivyDocument, IndexReader};
 use tokio::sync::RwLock;
 
 const IVF_MIN_TRAINING_POINTS: usize = 8;
@@ -191,6 +196,30 @@ struct NamespaceInner {
     wal_highwater: u64,
     ivf: Option<IvfIndex>,
     ivf_dirty: bool,
+    fts: Option<FtsIndex>,
+    fts_dirty: bool,
+}
+
+struct FtsIndex {
+    index: TantivyIndex,
+    reader: IndexReader,
+    field_map: HashMap<String, TantivyField>,
+}
+
+impl FtsIndex {
+    fn search(&self, field: Option<&str>, query: &str, top_k: usize) -> Result<Vec<Bm25SearchHit>> {
+        if let Some(name) = field {
+            if let Some(handle) = self.field_map.get(name) {
+                return self
+                    .index
+                    .search_with_fields(&self.reader, query, top_k, Some(&[*handle]));
+            } else {
+                return Ok(Vec::new());
+            }
+        }
+
+        self.index.search(&self.reader, query, top_k)
+    }
 }
 
 impl NamespaceInner {
@@ -201,6 +230,8 @@ impl NamespaceInner {
             wal_highwater: 0,
             ivf: None,
             ivf_dirty: true,
+            fts: None,
+            fts_dirty: true,
         }
     }
 
@@ -217,6 +248,7 @@ impl NamespaceInner {
             }
         }
         self.ivf_dirty = true;
+        self.fts_dirty = true;
         Ok(())
     }
 
@@ -224,12 +256,8 @@ impl NamespaceInner {
         if request.top_k == 0 {
             return Ok(Vec::new());
         }
-        let metric = request.metric.unwrap_or(self.config.distance_metric);
-        let query_vec = &request.vector;
-        if query_vec.is_empty() {
-            return Err(anyhow!("query vector must not be empty"));
-        }
 
+        let metric = request.metric.unwrap_or(self.config.distance_metric);
         let mut ann_params = request.ann_params.clone();
         ann_params.fill_defaults();
 
@@ -240,55 +268,143 @@ impl NamespaceInner {
             }
         }
 
-        let plan = if let Some(bitmap) = filter_bitmap.as_ref() {
-            select_query_plan(
-                self.rows.len(),
-                bitmap.len(),
-                ann_params.candidate_budget(request.top_k),
-                ann_params.use_ivf,
-            )
-        } else {
-            QueryPlan::VectorFirst
-        };
-
-        if matches!(plan, QueryPlan::FilterFirst) {
-            return self.brute_force_search(
-                query_vec,
-                metric,
-                request.top_k,
-                filter_bitmap.as_ref(),
-            );
+        let mut vector_query: Option<(&[f32], usize)> = None;
+        if let Some(RankBy::VectorAnn { vector, .. }) = request.rank_by.as_ref() {
+            vector_query = Some((vector.as_slice(), request.top_k));
         }
-
-        if ann_params.use_ivf {
-            self.ensure_ivf(metric, &ann_params)?;
-        }
-
-        let mut results = self.ann_hits(query_vec, metric, request.top_k, &ann_params)?;
-        if let Some(bitmap) = filter_bitmap.as_ref() {
-            results.retain(|hit| bitmap.contains(&hit.id));
-        }
-        if results.len() >= request.top_k {
-            results.sort_by(compare_hits);
-            results.truncate(request.top_k);
-            return Ok(results);
-        }
-
-        let brute =
-            self.brute_force_search(query_vec, metric, request.top_k, filter_bitmap.as_ref())?;
-        if results.is_empty() {
-            return Ok(brute);
-        }
-
-        let mut seen: HashSet<String> = results.iter().map(|hit| hit.id.clone()).collect();
-        for hit in brute {
-            if seen.insert(hit.id.clone()) {
-                results.push(hit);
+        for clause in &request.queries {
+            if let RankBy::VectorAnn { vector, .. } = &clause.rank_by {
+                vector_query = Some((vector.as_slice(), clause.top_k.unwrap_or(request.top_k)));
+                break;
             }
         }
-        results.sort_by(compare_hits);
-        results.truncate(request.top_k);
-        Ok(results)
+
+        let mut bm25_clauses: Vec<(&str, &str, usize)> = Vec::new();
+        if let Some(RankBy::Bm25 { field, query }) = request.rank_by.as_ref() {
+            bm25_clauses.push((field.as_str(), query.as_str(), request.top_k));
+        }
+        for clause in &request.queries {
+            if let RankBy::Bm25 { field, query } = &clause.rank_by {
+                bm25_clauses.push((
+                    field.as_str(),
+                    query.as_str(),
+                    clause.top_k.unwrap_or(request.top_k),
+                ));
+            }
+        }
+
+        if vector_query.is_none() && bm25_clauses.is_empty() {
+            return Err(anyhow!(
+                "rank_by or queries must include a supported search clause"
+            ));
+        }
+
+        let filter_bitmap_ref = filter_bitmap.as_ref();
+
+        let mut vector_hits: Vec<QueryHit> = Vec::new();
+        let mut vector_query_data: Option<Vec<f32>> = None;
+        if let Some((query_vec, clause_top_k)) = vector_query {
+            if query_vec.is_empty() {
+                return Err(anyhow!("query vector must not be empty"));
+            }
+            let candidate_top_k = clause_top_k.max(request.top_k);
+            vector_hits = self.vector_search(
+                query_vec,
+                metric,
+                candidate_top_k,
+                &ann_params,
+                filter_bitmap_ref,
+            )?;
+            vector_query_data = Some(query_vec.to_vec());
+        }
+
+        let mut bm25_scores: HashMap<String, f32> = HashMap::new();
+        if !bm25_clauses.is_empty() {
+            self.ensure_fts()?;
+            if let Some(fts) = self.fts.as_ref() {
+                for (field, query, clause_top_k) in bm25_clauses {
+                    let hits = fts.search(Some(field), query, clause_top_k)?;
+                    for hit in hits {
+                        if let Some(bitmap) = filter_bitmap_ref {
+                            if !bitmap.contains(&hit.doc_id) {
+                                continue;
+                            }
+                        }
+                        bm25_scores
+                            .entry(hit.doc_id.clone())
+                            .and_modify(|existing| {
+                                if hit.score > *existing {
+                                    *existing = hit.score;
+                                }
+                            })
+                            .or_insert(hit.score);
+                    }
+                }
+            }
+        }
+
+        if vector_hits.is_empty() {
+            if bm25_scores.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut hits: Vec<QueryHit> = bm25_scores
+                .into_iter()
+                .map(|(doc_id, score)| {
+                    let attributes = self
+                        .rows
+                        .get(&doc_id)
+                        .and_then(|row| row.attributes.clone());
+                    QueryHit {
+                        id: doc_id,
+                        score: -score,
+                        attributes,
+                    }
+                })
+                .collect();
+            hits.sort_by(compare_hits);
+            hits.truncate(request.top_k);
+            return Ok(hits);
+        }
+
+        let mut hits_by_id: HashMap<String, QueryHit> = vector_hits
+            .into_iter()
+            .map(|hit| (hit.id.clone(), hit))
+            .collect();
+
+        if !bm25_scores.is_empty() {
+            let query_vec = vector_query_data.as_ref().expect("vector data available");
+            for (doc_id, bm25_score) in bm25_scores {
+                if let Some(existing) = hits_by_id.get_mut(&doc_id) {
+                    existing.score = apply_bm25_boost(existing.score, bm25_score);
+                } else {
+                    let attributes = self
+                        .rows
+                        .get(&doc_id)
+                        .and_then(|row| row.attributes.clone());
+                    let mut score = None;
+                    if let Some(distance) =
+                        self.vector_distance_for(&doc_id, query_vec.as_slice(), metric)?
+                    {
+                        score = Some(distance);
+                    }
+                    let base = score.unwrap_or(1.0);
+                    let blended = apply_bm25_boost(base, bm25_score);
+                    hits_by_id.insert(
+                        doc_id.clone(),
+                        QueryHit {
+                            id: doc_id,
+                            score: blended,
+                            attributes,
+                        },
+                    );
+                }
+            }
+        }
+
+        let mut hits: Vec<QueryHit> = hits_by_id.into_values().collect();
+        hits.sort_by(compare_hits);
+        hits.truncate(request.top_k);
+        Ok(hits)
     }
 
     fn build_filter_bitmap(&self, request: &QueryRequest) -> Result<Option<FilterBitmap>> {
@@ -309,6 +425,166 @@ impl NamespaceInner {
         }
 
         Ok(bitmap)
+    }
+
+    fn vector_search(
+        &mut self,
+        query_vec: &[f32],
+        metric: DistanceMetric,
+        top_k: usize,
+        ann: &AnnParams,
+        filter: Option<&FilterBitmap>,
+    ) -> Result<Vec<QueryHit>> {
+        if top_k == 0 {
+            return Ok(Vec::new());
+        }
+
+        let plan = if let Some(bitmap) = filter {
+            select_query_plan(
+                self.rows.len(),
+                bitmap.len(),
+                ann.candidate_budget(top_k),
+                ann.use_ivf,
+            )
+        } else {
+            QueryPlan::VectorFirst
+        };
+
+        if matches!(plan, QueryPlan::FilterFirst) {
+            return self.brute_force_search(query_vec, metric, top_k, filter);
+        }
+
+        if ann.use_ivf {
+            self.ensure_ivf(metric, ann)?;
+        }
+
+        let mut results = self.ann_hits(query_vec, metric, top_k, ann)?;
+        if let Some(bitmap) = filter {
+            results.retain(|hit| bitmap.contains(&hit.id));
+        }
+        if results.len() >= top_k {
+            results.sort_by(compare_hits);
+            results.truncate(top_k);
+            return Ok(results);
+        }
+
+        let brute = self.brute_force_search(query_vec, metric, top_k, filter)?;
+        if results.is_empty() {
+            return Ok(brute);
+        }
+
+        let mut seen: HashSet<String> = results.iter().map(|hit| hit.id.clone()).collect();
+        for hit in brute {
+            if seen.insert(hit.id.clone()) {
+                results.push(hit);
+            }
+        }
+        results.sort_by(compare_hits);
+        results.truncate(top_k);
+        Ok(results)
+    }
+
+    fn ensure_fts(&mut self) -> Result<()> {
+        if !self.fts_dirty {
+            return Ok(());
+        }
+
+        let mut fields: BTreeSet<String> = BTreeSet::new();
+        for row in self.rows.values() {
+            let Some(attrs) = row.attributes.as_ref().and_then(|value| value.as_object()) else {
+                continue;
+            };
+            for (key, value) in attrs {
+                if value.is_string()
+                    || value
+                        .as_array()
+                        .map(|items| items.iter().any(|item| item.is_string()))
+                        .unwrap_or(false)
+                {
+                    fields.insert(key.clone());
+                }
+            }
+        }
+
+        if fields.is_empty() {
+            self.fts = None;
+            self.fts_dirty = false;
+            return Ok(());
+        }
+
+        let mut config = SchemaConfig::new("doc_id");
+        for field in &fields {
+            config = config.add_text_field(TextFieldConfig::new(field).stored());
+        }
+
+        let index = TantivyIndex::create_in_ram(config)?;
+        let mut writer = index
+            .index_writer(50_000_000)
+            .context("creating Tantivy index writer")?;
+        for row in self.rows.values() {
+            let mut doc = TantivyDocument::new();
+            doc.add_text(index.id_field(), &row.id);
+            if let Some(attrs) = row.attributes.as_ref().and_then(|value| value.as_object()) {
+                for (key, value) in attrs {
+                    let Some(field) = index.field(key) else {
+                        continue;
+                    };
+                    match value {
+                        serde_json::Value::String(text) => {
+                            doc.add_text(field, text);
+                        }
+                        serde_json::Value::Array(items) => {
+                            for item in items {
+                                if let serde_json::Value::String(text) = item {
+                                    doc.add_text(field, text);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            writer
+                .add_document(doc)
+                .context("adding document to Tantivy index")?;
+        }
+        writer
+            .commit()
+            .context("committing Tantivy index rebuild")?;
+        let reader = index.reader()?;
+
+        let mut field_map = HashMap::new();
+        for field_name in fields {
+            if let Some(field) = index.field(&field_name) {
+                field_map.insert(field_name, field);
+            }
+        }
+
+        self.fts = Some(FtsIndex {
+            index,
+            reader,
+            field_map,
+        });
+        self.fts_dirty = false;
+        Ok(())
+    }
+
+    fn vector_distance_for(
+        &self,
+        doc_id: &str,
+        query: &[f32],
+        metric: DistanceMetric,
+    ) -> Result<Option<f32>> {
+        let Some(row) = self.rows.get(doc_id) else {
+            return Ok(None);
+        };
+        let Some(vector) = row.vector.as_ref() else {
+            return Ok(None);
+        };
+        if vector.len() != query.len() {
+            return Ok(None);
+        }
+        Ok(Some(metric.distance(query, vector)?))
     }
 
     fn evaluate_filter(&self, filter: &FilterExpr) -> Result<FilterBitmap> {
@@ -775,6 +1051,15 @@ fn compare_hits(a: &QueryHit, b: &QueryHit) -> Ordering {
     }
 }
 
+fn apply_bm25_boost(base: f32, bm25_score: f32) -> f32 {
+    let adjusted = base - bm25_score * 0.01;
+    if adjusted.is_finite() {
+        adjusted
+    } else {
+        base
+    }
+}
+
 /// Namespace configuration relevant for Phase 1 execution.
 #[derive(Clone, Copy, Debug)]
 struct NamespaceConfig {
@@ -939,8 +1224,11 @@ pub enum RerankMode {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct QueryRequest {
     pub namespace: String,
-    pub vector: Vec<f32>,
     pub top_k: usize,
+    #[serde(default)]
+    pub rank_by: Option<RankBy>,
+    #[serde(default)]
+    pub queries: Vec<QueryClause>,
     #[serde(default)]
     pub metric: Option<DistanceMetric>,
     #[serde(default)]
@@ -953,6 +1241,187 @@ pub struct QueryRequest {
     pub filters: Option<FilterExpr>,
     #[serde(default)]
     pub filter_bitmap_ids: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RankBy {
+    VectorAnn { field: String, vector: Vec<f32> },
+    Bm25 { field: String, query: String },
+}
+
+impl RankBy {
+    pub fn vector(field: impl Into<String>, vector: Vec<f32>) -> Self {
+        Self::VectorAnn {
+            field: field.into(),
+            vector,
+        }
+    }
+
+    pub fn bm25(field: impl Into<String>, query: impl Into<String>) -> Self {
+        Self::Bm25 {
+            field: field.into(),
+            query: query.into(),
+        }
+    }
+}
+
+impl Serialize for RankBy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut seq = serializer.serialize_tuple(3)?;
+        match self {
+            RankBy::VectorAnn { field, vector } => {
+                seq.serialize_element(field)?;
+                seq.serialize_element("ANN")?;
+                seq.serialize_element(vector)?;
+            }
+            RankBy::Bm25 { field, query } => {
+                seq.serialize_element(field)?;
+                seq.serialize_element("BM25")?;
+                seq.serialize_element(query)?;
+            }
+        }
+        seq.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for RankBy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let values: Vec<serde_json::Value> = Vec::deserialize(deserializer)?;
+        if values.len() != 3 {
+            return Err(de::Error::custom(
+                "rank_by must contain exactly three elements",
+            ));
+        }
+        let field = values[0]
+            .as_str()
+            .ok_or_else(|| de::Error::custom("rank_by[0] must be a string field name"))?
+            .to_string();
+        let mode = values[1]
+            .as_str()
+            .ok_or_else(|| de::Error::custom("rank_by[1] must be a string mode"))?;
+        match mode {
+            "ANN" => parse_ann_vector(&values[2])
+                .map(|vector| RankBy::VectorAnn { field, vector })
+                .map_err(de::Error::custom),
+            "BM25" => {
+                let query = values[2]
+                    .as_str()
+                    .ok_or_else(|| de::Error::custom("rank_by BM25 payload must be a string"))?
+                    .to_string();
+                Ok(RankBy::Bm25 { field, query })
+            }
+            other => Err(de::Error::custom(format!(
+                "unsupported rank_by mode: {other}"
+            ))),
+        }
+    }
+}
+
+fn parse_ann_vector(value: &serde_json::Value) -> Result<Vec<f32>, String> {
+    match value {
+        serde_json::Value::Array(array) => {
+            let mut vector = Vec::with_capacity(array.len());
+            for value in array {
+                let Some(number) = value.as_f64() else {
+                    return Err("rank_by ANN payload must contain numeric values".to_string());
+                };
+                vector.push(number as f32);
+            }
+            Ok(vector)
+        }
+        serde_json::Value::String(text) => decode_base64_vector(text)
+            .map_err(|err| format!("failed to decode rank_by ANN base64 payload: {err}")),
+        other => Err(format!("unsupported rank_by ANN payload: {}", other)),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum VectorPrecision {
+    F16,
+    F32,
+}
+
+fn decode_base64_vector(input: &str) -> Result<Vec<f32>, String> {
+    let payload = input.strip_prefix("base64:").unwrap_or(input);
+    let (precision, data) = if let Some(rest) = payload.strip_prefix("f16:") {
+        (Some(VectorPrecision::F16), rest)
+    } else if let Some(rest) = payload.strip_prefix("f32:") {
+        (Some(VectorPrecision::F32), rest)
+    } else {
+        (None, payload)
+    };
+
+    let bytes = general_purpose::STANDARD
+        .decode(data)
+        .map_err(|err| format!("invalid base64 payload: {err}"))?;
+
+    match precision {
+        Some(VectorPrecision::F16) => decode_f16_bytes(&bytes),
+        Some(VectorPrecision::F32) => decode_f32_bytes(&bytes),
+        None => {
+            if bytes.is_empty() {
+                Ok(Vec::new())
+            } else if bytes.len() % 4 == 0 {
+                decode_f32_bytes(&bytes)
+            } else if bytes.len() % 2 == 0 {
+                decode_f16_bytes(&bytes)
+            } else {
+                Err(format!(
+                    "base64 vector byte length {} is not compatible with f16 or f32",
+                    bytes.len()
+                ))
+            }
+        }
+    }
+}
+
+fn decode_f32_bytes(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    if bytes.len() % 4 != 0 {
+        return Err(format!(
+            "expected byte length divisible by 4 for f32 payload, got {}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes
+        .chunks_exact(4)
+        .map(|chunk| {
+            let array: [u8; 4] = chunk
+                .try_into()
+                .expect("chunks_exact ensures chunk length is four bytes");
+            f32::from_le_bytes(array)
+        })
+        .collect())
+}
+
+fn decode_f16_bytes(bytes: &[u8]) -> Result<Vec<f32>, String> {
+    if bytes.len() % 2 != 0 {
+        return Err(format!(
+            "expected byte length divisible by 2 for f16 payload, got {}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes
+        .chunks_exact(2)
+        .map(|chunk| {
+            let array: [u8; 2] = chunk
+                .try_into()
+                .expect("chunks_exact ensures chunk length is two bytes");
+            f16::from_bits(u16::from_le_bytes(array)).to_f32()
+        })
+        .collect())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct QueryClause {
+    pub rank_by: RankBy,
+    #[serde(default)]
+    pub top_k: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1145,6 +1614,7 @@ impl RecallResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use half::f16;
     use serde_json::json;
 
     fn sample_store() -> LocalStore {
@@ -1166,6 +1636,47 @@ mod tests {
             vector: Some(vector.to_vec()),
             attributes: None,
         }
+    }
+
+    fn vector_query(namespace: &str, vector: Vec<f32>, top_k: usize) -> QueryRequest {
+        QueryRequest {
+            namespace: namespace.to_string(),
+            top_k,
+            rank_by: Some(RankBy::vector("vector", vector)),
+            queries: Vec::new(),
+            metric: None,
+            min_wal_sequence: None,
+            ann_params: Default::default(),
+            group_by: None,
+            filters: None,
+            filter_bitmap_ids: None,
+        }
+    }
+
+    #[test]
+    fn rank_by_vector_accepts_base64_f32_payload() {
+        let values = [1.0f32, -2.5f32];
+        let mut bytes = Vec::new();
+        for value in values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let payload = json!(["vector", "ANN", format!("base64:{encoded}")]);
+        let parsed: RankBy = serde_json::from_value(payload).expect("parse rank_by");
+        assert_eq!(parsed, RankBy::vector("vector", vec![1.0, -2.5]));
+    }
+
+    #[test]
+    fn rank_by_vector_accepts_base64_f16_payload() {
+        let values = [f16::from_f32(0.5), f16::from_f32(-1.0)];
+        let mut bytes = Vec::new();
+        for value in values {
+            bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let payload = json!(["vector", "ANN", format!("base64:f16:{encoded}")]);
+        let parsed: RankBy = serde_json::from_value(payload).expect("parse rank_by");
+        assert_eq!(parsed, RankBy::vector("vector", vec![0.5, -1.0]));
     }
 
     #[test]
@@ -1210,20 +1721,9 @@ mod tests {
             deletes: vec![],
         };
         let pointer = registry.apply_write(batch).await.expect("write");
-        let response = registry
-            .query(QueryRequest {
-                namespace: "ns".to_string(),
-                vector: vec![1.0, 0.0],
-                top_k: 1,
-                metric: None,
-                min_wal_sequence: Some(pointer.sequence),
-                ann_params: Default::default(),
-                group_by: None,
-                filters: None,
-                filter_bitmap_ids: None,
-            })
-            .await
-            .expect("query");
+        let mut request = vector_query("ns", vec![1.0, 0.0], 1);
+        request.min_wal_sequence = Some(pointer.sequence);
+        let response = registry.query(request).await.expect("query");
         assert_eq!(response.hits.len(), 1);
         assert_eq!(response.hits[0].id, "a");
         assert!(response.hits[0].score <= 1e-6);
@@ -1250,17 +1750,7 @@ mod tests {
             .await
             .expect("delete");
         let response = registry
-            .query(QueryRequest {
-                namespace: "ns".to_string(),
-                vector: vec![0.0, 1.0],
-                top_k: 1,
-                metric: None,
-                min_wal_sequence: None,
-                ann_params: Default::default(),
-                group_by: None,
-                filters: None,
-                filter_bitmap_ids: None,
-            })
+            .query(vector_query("ns", vec![0.0, 1.0], 1))
             .await
             .expect("query");
         assert!(response.hits.is_empty());
@@ -1289,25 +1779,14 @@ mod tests {
             .await
             .expect("write");
 
-        let response = registry
-            .query(QueryRequest {
-                namespace: "ns".to_string(),
-                vector: vec![-0.5, 0.0],
-                top_k: 3,
-                metric: None,
-                min_wal_sequence: None,
-                ann_params: AnnParams {
-                    use_ivf: true,
-                    target_recall: 0.2,
-                    nprobe: Some(1),
-                    ..Default::default()
-                },
-                group_by: None,
-                filters: None,
-                filter_bitmap_ids: None,
-            })
-            .await
-            .expect("query");
+        let mut request = vector_query("ns", vec![-0.5, 0.0], 3);
+        request.ann_params = AnnParams {
+            use_ivf: true,
+            target_recall: 0.2,
+            nprobe: Some(1),
+            ..Default::default()
+        };
+        let response = registry.query(request).await.expect("query");
 
         assert!(!response.hits.is_empty(), "ivf should return candidates");
         assert!(
@@ -1329,18 +1808,10 @@ mod tests {
             .await
             .expect("initial write");
 
+        let mut request = vector_query("ns", vec![1.0, 0.0], 1);
+        request.min_wal_sequence = Some(pointer.sequence + 1);
         let err = registry
-            .query(QueryRequest {
-                namespace: "ns".to_string(),
-                vector: vec![1.0, 0.0],
-                top_k: 1,
-                metric: None,
-                min_wal_sequence: Some(pointer.sequence + 1),
-                ann_params: Default::default(),
-                group_by: None,
-                filters: None,
-                filter_bitmap_ids: None,
-            })
+            .query(request)
             .await
             .expect_err("consistency requirement should fail");
         assert!(err.to_string().contains("consistency level unmet"));
@@ -1372,18 +1843,10 @@ mod tests {
             .expect("external append");
         assert!(second_pointer.sequence > first_pointer.sequence);
 
+        let mut request = vector_query("ns", vec![0.0, 1.0], 1);
+        request.min_wal_sequence = Some(second_pointer.sequence);
         let response = registry
-            .query(QueryRequest {
-                namespace: "ns".to_string(),
-                vector: vec![0.0, 1.0],
-                top_k: 1,
-                metric: None,
-                min_wal_sequence: Some(second_pointer.sequence),
-                ann_params: Default::default(),
-                group_by: None,
-                filters: None,
-                filter_bitmap_ids: None,
-            })
+            .query(request)
             .await
             .expect("query should reload WAL");
 
@@ -1410,23 +1873,12 @@ mod tests {
             .await
             .expect("bulk write");
 
-        let response = registry
-            .query(QueryRequest {
-                namespace: "ns".to_string(),
-                vector: vec![1.0, 25.0],
-                top_k: 1,
-                metric: None,
-                min_wal_sequence: None,
-                ann_params: AnnParams {
-                    use_ivf: false,
-                    ..Default::default()
-                },
-                group_by: None,
-                filters: None,
-                filter_bitmap_ids: None,
-            })
-            .await
-            .expect("brute-force query");
+        let mut request = vector_query("ns", vec![1.0, 25.0], 1);
+        request.ann_params = AnnParams {
+            use_ivf: false,
+            ..Default::default()
+        };
+        let response = registry.query(request).await.expect("brute-force query");
 
         assert_eq!(response.hits.len(), 1);
         assert_eq!(response.hits[0].id, "doc-15");
@@ -1463,24 +1915,13 @@ mod tests {
             .await
             .expect("seed documents");
 
-        let response = registry
-            .query(QueryRequest {
-                namespace: "ns".to_string(),
-                vector: vec![1.0, 0.0],
-                top_k: 3,
-                metric: None,
-                min_wal_sequence: None,
-                ann_params: Default::default(),
-                group_by: Some(GroupBy {
-                    field: "category".to_string(),
-                    limit: 5,
-                    per_group_limit: 2,
-                }),
-                filters: None,
-                filter_bitmap_ids: None,
-            })
-            .await
-            .expect("grouped query");
+        let mut request = vector_query("ns", vec![1.0, 0.0], 3);
+        request.group_by = Some(GroupBy {
+            field: "category".to_string(),
+            limit: 5,
+            per_group_limit: 2,
+        });
+        let response = registry.query(request).await.expect("grouped query");
 
         let groups = response.groups.expect("expected groups");
         assert_eq!(groups.len(), 2);
@@ -1562,23 +2003,12 @@ mod tests {
             .await
             .expect("seed docs");
 
-        let response = registry
-            .query(QueryRequest {
-                namespace: "ns".to_string(),
-                vector: vec![1.0, 0.0],
-                top_k: 2,
-                metric: None,
-                min_wal_sequence: None,
-                ann_params: Default::default(),
-                group_by: None,
-                filters: Some(FilterExpr::Eq {
-                    field: "category".to_string(),
-                    value: json!("news"),
-                }),
-                filter_bitmap_ids: None,
-            })
-            .await
-            .expect("filtered query");
+        let mut request = vector_query("ns", vec![1.0, 0.0], 2);
+        request.filters = Some(FilterExpr::Eq {
+            field: "category".to_string(),
+            value: json!("news"),
+        });
+        let response = registry.query(request).await.expect("filtered query");
 
         assert_eq!(response.hits.len(), 1);
         assert_eq!(response.hits[0].id, "doc-1");
@@ -1615,25 +2045,115 @@ mod tests {
             .await
             .expect("seed docs");
 
+        let mut request = vector_query("ns", vec![0.0, 1.0], 3);
+        request.filters = Some(FilterExpr::Eq {
+            field: "category".to_string(),
+            value: json!("news"),
+        });
+        request.filter_bitmap_ids = Some(vec!["doc-2".to_string()]);
         let response = registry
-            .query(QueryRequest {
-                namespace: "ns".to_string(),
-                vector: vec![0.0, 1.0],
-                top_k: 3,
-                metric: None,
-                min_wal_sequence: None,
-                ann_params: Default::default(),
-                group_by: None,
-                filters: Some(FilterExpr::Eq {
-                    field: "category".to_string(),
-                    value: json!("news"),
-                }),
-                filter_bitmap_ids: Some(vec!["doc-2".to_string()]),
-            })
+            .query(request)
             .await
             .expect("bitmap filtered query");
 
         assert_eq!(response.hits.len(), 1);
         assert_eq!(response.hits[0].id, "doc-2");
+    }
+
+    #[tokio::test]
+    async fn bm25_query_returns_textual_matches() {
+        let store = sample_store();
+        let registry = NamespaceRegistry::new(store);
+        let docs = vec![
+            Document {
+                id: "doc-1".to_string(),
+                vector: None,
+                attributes: Some(json!({ "content": "Rust search engine overview" })),
+            },
+            Document {
+                id: "doc-2".to_string(),
+                vector: None,
+                attributes: Some(json!({ "content": "Hybrid search primer" })),
+            },
+        ];
+
+        registry
+            .apply_write(WriteBatch {
+                namespace: "ns".to_string(),
+                upserts: docs,
+                deletes: Vec::new(),
+            })
+            .await
+            .expect("seed bm25 docs");
+
+        let request = QueryRequest {
+            namespace: "ns".to_string(),
+            top_k: 1,
+            rank_by: Some(RankBy::bm25("content", "rust search")),
+            queries: Vec::new(),
+            metric: None,
+            min_wal_sequence: None,
+            ann_params: Default::default(),
+            group_by: None,
+            filters: None,
+            filter_bitmap_ids: None,
+        };
+
+        let response = registry.query(request).await.expect("bm25 query");
+        assert_eq!(response.hits.len(), 1);
+        assert_eq!(response.hits[0].id, "doc-1");
+        assert!(response.hits[0].score.is_sign_negative());
+    }
+
+    #[tokio::test]
+    async fn hybrid_vector_and_bm25_adds_candidates() {
+        let store = sample_store();
+        let registry = NamespaceRegistry::new(store);
+        let docs = vec![
+            Document {
+                id: "doc-vec".to_string(),
+                vector: Some(vec![1.0, 0.0]),
+                attributes: Some(json!({ "content": "Rust vector search" })),
+            },
+            Document {
+                id: "doc-text".to_string(),
+                vector: None,
+                attributes: Some(json!({ "content": "Hybrid search introduction" })),
+            },
+        ];
+
+        registry
+            .apply_write(WriteBatch {
+                namespace: "ns".to_string(),
+                upserts: docs,
+                deletes: Vec::new(),
+            })
+            .await
+            .expect("seed hybrid docs");
+
+        let request = QueryRequest {
+            namespace: "ns".to_string(),
+            top_k: 2,
+            rank_by: Some(RankBy::vector("vector", vec![1.0, 0.0])),
+            queries: vec![QueryClause {
+                rank_by: RankBy::bm25("content", "hybrid"),
+                top_k: Some(1),
+            }],
+            metric: None,
+            min_wal_sequence: None,
+            ann_params: Default::default(),
+            group_by: None,
+            filters: None,
+            filter_bitmap_ids: None,
+        };
+
+        let response = registry
+            .query(request)
+            .await
+            .expect("hybrid query should succeed");
+
+        let ids: Vec<_> = response.hits.iter().map(|hit| hit.id.as_str()).collect();
+        assert!(ids.contains(&"doc-vec"));
+        assert!(ids.contains(&"doc-text"));
     }
 }

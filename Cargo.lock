@@ -650,6 +650,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.21.7",
  "elax-core",
  "elax-filter",
  "elax-metrics",
@@ -701,14 +702,18 @@ name = "elax-core"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "base64 0.21.7",
  "elax-erq",
  "elax-filter",
+ "elax-fts",
  "elax-ivf",
  "elax-metrics",
  "elax-store",
+ "half",
  "metrics 0.21.1",
  "serde",
  "serde_json",
+ "tantivy",
  "tokio",
 ]
 
