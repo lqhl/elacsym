@@ -1,0 +1,11 @@
+[profile.dev]
+debug = 0
+incremental = true
+
+[profile.test]
+debug = 0
+incremental = true
+
+[profile.bench]
+debug = 0
+incremental = true

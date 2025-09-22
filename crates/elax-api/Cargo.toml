@@ -21,3 +21,4 @@ metrics = "0.21"
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
 http-body-util = "0.1"
+base64 = "0.21"

@@ -9,6 +9,8 @@ rust-version.workspace = true
 [dependencies]
 anyhow = "1"
 elax-store = { path = "../elax-store" }
+elax-filter = { path = "../elax-filter" }
+serde_json = "1"
 metrics = "0.21"
 
 [dev-dependencies]

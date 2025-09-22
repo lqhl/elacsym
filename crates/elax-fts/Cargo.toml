@@ -14,7 +14,7 @@ serde = { version = "1", features = ["derive"] }
 tantivy = { version = "0.21", default-features = false, features = ["mmap", "stopwords", "lz4-compression"] }
 object_store = { version = "0.7", default-features = false }
 ownedbytes = "0.6"
-tokio = { version = "1", features = ["rt"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 serde_with = "3"
 futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
 

@@ -1,6 +1,6 @@
 //! Tantivy-backed full-text search utilities.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Context, Result};
 use tantivy::collector::TopDocs;
@@ -238,23 +238,47 @@ impl TantivyIndex {
             .context("failed to open Tantivy index reader")
     }
 
-    /// Executes a BM25 query and returns scored document identifiers.
+    /// Executes a BM25 query using all configured text fields.
     pub fn search(
         &self,
         reader: &IndexReader,
         query: &str,
         top_k: usize,
     ) -> Result<Vec<SearchHit>> {
+        self.search_with_fields(reader, query, top_k, None::<&[schema::Field]>)
+    }
+
+    /// Executes a BM25 query restricted to a subset of fields.
+    pub fn search_with_fields(
+        &self,
+        reader: &IndexReader,
+        query: &str,
+        top_k: usize,
+        fields: Option<&[schema::Field]>,
+    ) -> Result<Vec<SearchHit>> {
         if top_k == 0 {
             return Ok(Vec::new());
         }
 
         let searcher = reader.searcher();
-        let default_fields: Vec<_> = self.text_fields.iter().map(|f| f.field).collect();
-        let mut parser = QueryParser::for_index(&self.index, default_fields);
-        for field in &self.text_fields {
-            if (field.boost - 1.0).abs() > f32::EPSILON {
-                parser.set_field_boost(field.field, field.boost);
+        let default_fields: Vec<_> = match fields {
+            Some(custom) => custom.to_vec(),
+            None => self.text_fields.iter().map(|f| f.field).collect(),
+        };
+        let mut parser = QueryParser::for_index(&self.index, default_fields.clone());
+
+        if fields.is_some() {
+            let allowed: HashSet<schema::Field> = default_fields.into_iter().collect();
+            for field in &self.text_fields {
+                if allowed.contains(&field.field) && (field.boost - 1.0).abs() > f32::EPSILON {
+                    parser.set_field_boost(field.field, field.boost);
+                }
+            }
+        } else {
+            for field in &self.text_fields {
+                if (field.boost - 1.0).abs() > f32::EPSILON {
+                    parser.set_field_boost(field.field, field.boost);
+                }
             }
         }
 

@@ -1,6 +1,9 @@
+#![recursion_limit = "4096"]
+
 //! Storage layer abstractions for WAL, parts, and router metadata.
 
 use std::{
+    collections::BTreeMap,
     fmt,
     io::ErrorKind,
     path::PathBuf,
@@ -15,6 +18,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema};
 use bytes::Bytes;
+use elax_filter::FilterExpr;
 use futures::TryStreamExt;
 use object_store::{path::Path as ObjectPath, Error as ObjectStoreError, ObjectStore};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -831,8 +835,45 @@ pub struct WalBatch {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum WriteOp {
-    Upsert { document: Document },
-    Delete { id: String },
+    Upsert {
+        document: Document,
+    },
+    Patch {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vector: Option<VectorPatch>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attributes: Option<AttributesPatch>,
+    },
+    Delete {
+        id: String,
+    },
+    DeleteByFilter {
+        filter: FilterExpr,
+    },
+}
+
+/// Patch operation for vector payloads.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum VectorPatch {
+    Set { value: Vec<f32> },
+    Remove,
+}
+
+/// Patch operation for attribute objects.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AttributesPatch {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub set: BTreeMap<String, serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clear: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Minimal document representation stored in the WAL.

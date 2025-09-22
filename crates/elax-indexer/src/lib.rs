@@ -1,12 +1,17 @@
+#![recursion_limit = "4096"]
+
 //! Background indexer and compaction workflows for materializing parts.
 
 use std::{
+    collections::HashSet,
     sync::atomic::{AtomicU64, Ordering},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
-use elax_store::{Document, LocalStore, PartManifest, RouterState, WriteOp};
+use anyhow::{anyhow, Context, Result};
+use elax_store::{
+    AttributesPatch, Document, LocalStore, PartManifest, RouterState, VectorPatch, WriteOp,
+};
 use metrics::{counter, histogram};
 
 static PART_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -88,8 +93,32 @@ impl Indexer {
                         bucket_rows += 1;
                         bucket_docs.push(document);
                     }
+                    WriteOp::Patch {
+                        id,
+                        vector,
+                        attributes,
+                    } => {
+                        if let Some(doc) = bucket_docs.iter_mut().find(|doc| doc.id == id) {
+                            apply_document_patch(doc, vector.as_ref(), attributes.as_ref())?;
+                        }
+                    }
                     WriteOp::Delete { id } => {
                         bucket_deletes.push(id);
+                    }
+                    WriteOp::DeleteByFilter { filter } => {
+                        let mut matched = HashSet::new();
+                        for doc in &bucket_docs {
+                            if elax_filter::evaluate(
+                                &filter,
+                                doc.attributes.as_ref(),
+                                Some(doc.id.as_str()),
+                            )? {
+                                matched.insert(doc.id.clone());
+                            }
+                        }
+                        for id in matched {
+                            bucket_deletes.push(id);
+                        }
                     }
                 }
             }
@@ -266,6 +295,65 @@ impl Indexer {
         );
         Ok(1)
     }
+}
+
+fn apply_document_patch(
+    doc: &mut Document,
+    vector: Option<&VectorPatch>,
+    attributes: Option<&AttributesPatch>,
+) -> Result<()> {
+    if let Some(patch) = vector {
+        match patch {
+            VectorPatch::Set { value } => {
+                doc.vector = Some(value.clone());
+            }
+            VectorPatch::Remove => {
+                doc.vector = None;
+            }
+        }
+    }
+
+    if let Some(patch) = attributes {
+        apply_attributes_patch_document(&mut doc.attributes, patch)?;
+    }
+
+    Ok(())
+}
+
+fn apply_attributes_patch_document(
+    target: &mut Option<serde_json::Value>,
+    patch: &AttributesPatch,
+) -> Result<()> {
+    let mut map = match target.take() {
+        Some(serde_json::Value::Object(map)) => map,
+        Some(serde_json::Value::Null) => serde_json::Map::new(),
+        Some(other) => {
+            return Err(anyhow!(
+                "cannot apply attribute patch to non-object value: {other}"
+            ));
+        }
+        None => serde_json::Map::new(),
+    };
+
+    if patch.clear {
+        map.clear();
+    }
+
+    for key in &patch.remove {
+        map.remove(key);
+    }
+
+    for (key, value) in &patch.set {
+        map.insert(key.clone(), value.clone());
+    }
+
+    if map.is_empty() {
+        *target = None;
+    } else {
+        *target = Some(serde_json::Value::Object(map));
+    }
+
+    Ok(())
 }
 
 /// Convenience helper matching the previous Phase 2 API.

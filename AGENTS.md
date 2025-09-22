@@ -82,10 +82,19 @@ Legend: `TODO` = not started, `DOING` = in progress, `DONE` = complete.
   - Step: DONE — Add unit tests covering planner decisions, filter execution, and bitmap intersections on synthetic datasets.
 
 #### Full-text & hybrid search flows
-- Status: TODO — Thread `rank_by`, `filters`, and multi-query payloads through the HTTP surface, core planner, and Tantivy bridge, ensuring hybrid vector+BM25 scoring is validated with integration tests.
+- Status: DONE — Thread `rank_by`, `filters`, and multi-query payloads through the HTTP surface, core planner, and Tantivy bridge, ensuring hybrid vector+BM25 scoring is validated with integration tests (including base64 vector payload decoding).
+  - Step: DONE — Review `docs/design.md` and existing Phase 1 vector query implementation to map required changes.
+  - Step: DONE — Extend `elax-core` query planner/data types to support BM25 and hybrid candidate flows (including Tantivy index management).
+  - Step: DONE — Update `elax-api` payload handling plus unit/integration tests to exercise BM25-only and hybrid queries.
+  - Step: DONE — Run `cargo fmt`, `cargo clippy --all-targets --all-features -D warnings`, and `cargo test --workspace` to validate the implementation.
 
 #### Write/consistency features
-- Status: TODO — Implement patch/upsert columns, conditional writes, and delete-by-filter semantics in the write API while surfacing eventual-consistency toggles on the query path.
+- Status: DONE — Implement patch/upsert columns, conditional writes, and delete-by-filter semantics in the write API while surfacing eventual-consistency toggles on the query path.
+  - Step: DONE — Extend the write payload/WAL types to capture patch operations, columnar inputs, delete-by-filter, and convert HTTP requests into the new structures.
+  - Step: DONE — Enforce per-operation conditions against the namespace WAL high-water mark, returning explicit errors when preconditions fail.
+  - Step: DONE — Add delete-by-filter execution plus vector/attribute patch application in the in-memory state and persistence layer.
+  - Step: DONE — Surface query consistency toggles (strong vs eventual) through the API/core planner and add coverage for the new behavior.
+  - Step: DONE — Add unit/integration tests for columnar upserts/patches, conditional writes, delete-by-filter, and eventual query consistency.
 
 #### Metadata & admin endpoints
 - Status: TODO — Add namespace enumeration, schema retrieval, cache warm hints, and recall evaluation endpoints to the API server backed by store lookups and operational runbooks.
@@ -93,6 +102,19 @@ Legend: `TODO` = not started, `DOING` = in progress, `DONE` = complete.
 #### Namespace schema & advanced ERQ capabilities
 - Status: TODO — Persist namespace schemas (attribute types, distance metric, analyzers) and extend the ERQ crate with codebook learning, residual coding, and SIMD kernel dispatch validated by property tests.
 
+#### Workspace test stabilization
+- Status: TODO — Bring `cargo test --workspace` back to a shippable state now that hybrid search and write-path patches have landed.
+  - Step: DOING — Profile the current workspace build to identify which crates dominate the compile/test wall time and capture failing specs once the binaries link (first `cargo test --workspace` and crate-scoped runs still spend 5+ minutes in `rustc` even with `-Cdebuginfo=0`).
+  - Step: TODO — Land a repo-wide Cargo profile override (e.g., disable debuginfo for `dev`/`test` profiles and enable incremental) so repeated `cargo test` runs finish quickly enough to surface actual failures.
+  - Step: TODO — Triage the observed test failures (or timeouts) starting with `elax-core` hybrid flows and `elax-api` integration suites, updating fixtures as needed for the new request shapes.
+  - Step: TODO — Implement the fixes and add coverage so the slowest suites can be exercised piecemeal without paying the full workspace rebuild each run.
+
 #### Tantivy directory runtime isolation
 - Status: DONE — Switch the `ObjectStoreDirectory` to use a dedicated Tokio runtime instead of `Handle::block_on` to avoid panics when invoked from async query handlers.
 - Status: DONE — Add regression coverage exercising the directory from within an active Tokio runtime to ensure reads and writes succeed without blocking the caller's executor.
+
+#### FTS Tokio feature parity
+- Status: DONE — Ensure the `elax-fts` crate enables the Tokio runtime features required by its tests and runtime helpers.
+  - Step: DONE — Reproduce the failing `elax-fts` unit tests and confirm the `tokio::runtime::Builder::new_multi_thread` symbol is unavailable with the current feature set.
+  - Step: DONE — Update the crate's Tokio dependency to include the `rt-multi-thread` feature so the multi-thread runtime builder is available during tests.
+  - Step: DONE — Re-run the `elax-fts` test suite to verify the runtime now builds successfully.

@@ -13,7 +13,11 @@ elax-ivf = { path = "../elax-ivf" }
 elax-erq = { path = "../elax-erq" }
 elax-metrics = { path = "../elax-metrics" }
 elax-filter = { path = "../elax-filter" }
+elax-fts = { path = "../elax-fts" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "macros"] }
 metrics = "0.21"
+tantivy = { version = "0.21", default-features = false, features = ["mmap", "stopwords", "lz4-compression"] }
+base64 = "0.21"
+half = "2"
