@@ -11,13 +11,14 @@ Elacsym is a cost-effective, scalable vector database inspired by [turbopuffer](
 
 ### Key Features
 
-- 🚀 **High Performance**: RaBitQ quantization + HNSW for fast vector search
+- 🚀 **High Performance**: RaBitQ quantization for fast vector search
 - 💰 **Cost Effective**: Object storage backend (up to 100x cheaper than in-memory)
 - 🔄 **Hybrid Cache**: Memory + Disk caching with [foyer](https://github.com/foyer-rs/foyer)
-- 🔍 **Full-Text Search**: Integrated [Tantivy](https://github.com/quickwit-oss/tantivy) for text search
-- 🎯 **Hybrid Search**: Combine vector similarity + full-text + attribute filters
-- 🛡️ **ACID Transactions**: Tombstone-based deletions with MVCC
+- 🔍 **Full-Text Search**: BM25-based full-text search with [Tantivy](https://github.com/quickwit-oss/tantivy)
+- 🎯 **Hybrid Search**: RRF fusion for vector + full-text search
+- 🛡️ **Durability**: Write-Ahead Log (WAL) for crash safety
 - 📦 **Columnar Storage**: Efficient Parquet format for segments
+- ⚡ **Multi-Field Search**: Search across multiple text fields with weights
 
 ## Architecture
 
@@ -26,8 +27,10 @@ Elacsym is a cost-effective, scalable vector database inspired by [turbopuffer](
 │              HTTP API (Axum)                    │
 ├─────────────────────────────────────────────────┤
 │  Query Engine  │  Write Coordinator             │
+│  ├─ RRF Fusion │  └─ WAL                        │
 ├─────────────────────────────────────────────────┤
 │  RaBitQ Index  │  Tantivy Full-Text             │
+│  └─ Vector ANN │  └─ BM25 + Multi-Field         │
 ├─────────────────────────────────────────────────┤
 │  Foyer Cache (Memory + Disk)                    │
 ├─────────────────────────────────────────────────┤
@@ -42,7 +45,7 @@ See [docs/DESIGN.md](docs/DESIGN.md) for detailed architecture.
 ### Installation
 
 ```bash
-git clone https://github.com/yourusername/elacsym.git
+git clone https://github.com/lqhl/elacsym.git
 cd elacsym
 cargo build --release
 ```
@@ -71,8 +74,22 @@ curl -X PUT http://localhost:3000/v1/namespaces/docs \
       "vector_dim": 128,
       "vector_metric": "l2",
       "attributes": {
-        "title": {"type": "string", "full_text": true},
-        "category": {"type": "string", "indexed": true}
+        "title": {
+          "type": "string",
+          "full_text": {
+            "language": "english",
+            "stemming": true,
+            "remove_stopwords": true
+          }
+        },
+        "description": {
+          "type": "string",
+          "full_text": true
+        },
+        "category": {
+          "type": "string",
+          "indexed": true
+        }
       }
     }
   }'
@@ -90,6 +107,7 @@ curl -X POST http://localhost:3000/v1/namespaces/docs/upsert \
         "vector": [0.1, 0.2, ...],
         "attributes": {
           "title": "Rust Vector Database",
+          "description": "Fast and efficient vector search",
           "category": "tech",
           "score": 4.5
         }
@@ -116,19 +134,36 @@ curl -X POST http://localhost:3000/v1/namespaces/docs/query \
   }'
 ```
 
-#### Hybrid Search
+#### Multi-Field Full-Text Search
+
+```bash
+curl -X POST http://localhost:3000/v1/namespaces/docs/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "full_text": {
+      "fields": ["title", "description"],
+      "query": "rust database",
+      "weights": {
+        "title": 2.0,
+        "description": 1.0
+      }
+    },
+    "top_k": 10
+  }'
+```
+
+#### Hybrid Search (Vector + Full-Text with RRF)
 
 ```bash
 curl -X POST http://localhost:3000/v1/namespaces/docs/query \
   -H "Content-Type: application/json" \
   -d '{
     "vector": [0.1, 0.2, ...],
-    "top_k": 10,
     "full_text": {
       "field": "title",
-      "query": "rust database",
-      "weight": 0.3
+      "query": "rust database"
     },
+    "top_k": 10,
     "filter": {
       "type": "and",
       "conditions": [
@@ -162,42 +197,60 @@ disk_size = 107374182400  # 100GB
 
 ## Development Roadmap
 
-### Phase 1: MVP + Core Query Features (Current - 85% Complete ✅)
-- [x] Project structure
+### ✅ Phase 1: MVP (100% Complete)
+- [x] Project structure and dependencies
 - [x] Storage abstraction (S3 + Local FS)
-- [x] Basic types and error handling
+- [x] Core type system (types.rs, error.rs)
 - [x] Manifest persistence (with tests)
 - [x] Segment Parquet read/write (with tests)
 - [x] RaBitQ vector index integration (with tests)
 - [x] Namespace manager (with tests)
 - [x] HTTP API endpoints (Upsert + Query)
-- [x] **Segment document retrieval** ✨ NEW
-- [x] **Foyer cache integration** ✨ NEW
-- [x] **Query returns full documents with attributes** ✨ NEW
-- [ ] Attribute filtering execution
-- [ ] Tantivy full-text search
+- [x] Design documentation
 
-**Current Status**: **Query pipeline complete!** Vector search now returns full documents with attributes. Foyer cache (Memory + Disk) is integrated for segment caching. All 11 unit tests passing. Server runs on port 3000.
+### ✅ Phase 2: Advanced Features (100% Complete)
+- [x] **Segment document retrieval**
+- [x] **Foyer cache integration (Memory + Disk)**
+- [x] **Attribute filtering** (FilterExecutor with all operators)
+- [x] **Tantivy full-text search** (BM25 with multi-field support)
+- [x] **RRF fusion** for hybrid search
+- [x] **Advanced full-text config** (language, stemming, stopwords)
+- [x] **Write-Ahead Log (WAL)** for durability
 
-**Recent Improvements (Session 5)**:
-- ✅ Implemented `SegmentReader::read_documents_by_ids()` for efficient document retrieval
-- ✅ Integrated Foyer cache with `get_or_fetch()` pattern for segments
-- ✅ Updated `Namespace::query()` to fetch and return complete documents
-- ✅ Added cache configuration with environment variables (`ELACSYM_CACHE_PATH`, `ELACSYM_DISABLE_CACHE`)
-- ✅ Query responses now include vectors and attributes (controllable via `include_vector`, `include_attributes`)
+**Status**: All Phase 2 features implemented and tested!
+- 17 unit tests passing
+- Complete query pipeline: filter → vector search → full-text → RRF fusion
+- WAL ensures crash-safe writes
+- Multi-field full-text with per-field weights
 
-### Phase 2: Advanced Features (Next Up)
-- [ ] Attribute filtering execution (types defined, executor needed)
-- [ ] Tantivy full-text search integration
-- [ ] Hybrid search with RRF fusion
-- [ ] Tombstone-based deletion
-- [ ] WAL for write durability
+### 🚧 Phase 3: Production Readiness (In Progress)
 
-### Phase 3: Production Ready
-- [ ] LSM-tree style compaction
-- [ ] Distributed deployment
-- [ ] Monitoring and metrics
-- [ ] Benchmark suite
+#### P0 - Critical for Production
+- [ ] **WAL Recovery** - Replay uncommitted operations on startup
+- [ ] **WAL Rotation** - Prevent unbounded WAL growth
+- [ ] **Tantivy Analyzer Config** - Apply advanced full-text settings
+- [ ] **Error Recovery** - Graceful handling of corruption
+- [ ] **Integration Tests** - End-to-end testing
+
+#### P1 - Performance & Reliability
+- [ ] **LSM-tree Compaction** - Merge small segments
+- [ ] **Index Rebuild** - Rebuild vector index after compaction
+- [ ] **Metrics & Monitoring** - Prometheus metrics
+- [ ] **Benchmarks** - Performance testing suite
+- [ ] **Query Optimizer** - Cost-based query planning
+
+#### P2 - Advanced Features
+- [ ] **Distributed Mode** - Multi-node deployment
+- [ ] **Replication** - Data redundancy
+- [ ] **Snapshot & Restore** - Backup/recovery
+- [ ] **Query Caching** - Cache query results
+- [ ] **Bulk Import** - Fast batch loading
+
+### 📚 Phase 4: Ecosystem
+- [ ] Client SDKs (Python, JavaScript, Go)
+- [ ] Kubernetes Operator
+- [ ] Cloud-native deployment guides
+- [ ] Performance tuning guide
 
 ## Performance Goals
 
@@ -206,6 +259,7 @@ disk_size = 107374182400  # 100GB
 | Hot query | 1M vectors | < 20ms |
 | Cold query | 1M vectors | < 500ms |
 | Write throughput | - | > 1000 docs/s |
+| Hybrid search | 1M vectors | < 100ms |
 
 ## Tech Stack
 
@@ -216,6 +270,27 @@ disk_size = 107374182400  # 100GB
 - **Cache**: [foyer](https://github.com/foyer-rs/foyer)
 - **Full-Text**: [Tantivy](https://github.com/quickwit-oss/tantivy)
 - **Columnar**: Arrow + Parquet
+- **WAL**: MessagePack + CRC32
+
+## Recent Updates
+
+### Session 6 (2025-10-05) - Advanced Features Complete! 🎉
+- ✅ Multi-field full-text search with per-field weights
+- ✅ RRF (Reciprocal Rank Fusion) for hybrid search
+- ✅ Advanced full-text schema configuration
+- ✅ Write-Ahead Log (WAL) for crash-safe durability
+- ✅ Attribute filtering (Eq, Ne, Gt, Gte, Lt, Lte, Contains, ContainsAny)
+- ✅ Complete Foyer cache integration
+
+See [docs/SESSION_6_SUMMARY.md](docs/SESSION_6_SUMMARY.md) for details.
+
+## Documentation
+
+- [Design Document](docs/DESIGN.md) - Architecture and design decisions
+- [Session Summaries](docs/) - Development progress
+  - [Session 5](docs/SESSION_5_SUMMARY.md) - Cache integration & query pipeline
+  - [Session 6](docs/SESSION_6_SUMMARY.md) - Advanced features (RRF, WAL, multi-field)
+- [Turbopuffer Comparison](docs/FULLTEXT_COMPARISON.md) - Full-text search design
 
 ## Contributing
 

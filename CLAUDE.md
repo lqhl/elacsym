@@ -3,13 +3,13 @@
 > 本文档专为 Claude Code 准备，用于跨会话工作时快速上下文恢复
 
 **最后更新**: 2025-10-05
-**项目状态**: 🚀 **Phase 1.5 完成！** 查询流程端到端可用，带缓存优化
+**项目状态**: 🎉 **Phase 2 完成！** 生产级功能已实现
 
 ---
 
 ## 📋 快速状态检查
 
-### ✅ 已完成
+### ✅ Phase 1: MVP (100% 完成)
 - [x] 项目结构和依赖配置
 - [x] 存储抽象层（S3 + Local FS）
 - [x] 核心类型系统 (types.rs, error.rs)
@@ -22,28 +22,60 @@
 - [x] Axum 服务器集成
 - [x] API 路由框架
 - [x] 设计文档 (docs/DESIGN.md)
-- [x] CLAUDE.md 工作指南
-- [x] **Segment 文档读取功能** ✨ NEW (Session 5)
-- [x] **Foyer 缓存集成（Memory + Disk）** ✨ NEW (Session 5)
-- [x] **完整查询流程：索引搜索 → 读取 Segment → 返回文档** ✨ NEW (Session 5)
+
+### ✅ Phase 2: Advanced Features (100% 完成)
+- [x] **Segment 文档读取功能** (Session 5)
+- [x] **Foyer 缓存集成（Memory + Disk）** (Session 5)
+- [x] **完整查询流程：索引搜索 → 读取 Segment → 返回文档** (Session 5)
+- [x] **属性过滤执行器** (Session 5-6)
+  - FilterExecutor with Eq, Ne, Gt, Gte, Lt, Lte, Contains, ContainsAny
+- [x] **Tantivy 全文搜索** (Session 6)
+  - BM25 算法
+  - 单字段和多字段搜索
+  - 每个字段可配置权重
+- [x] **RRF 融合算法** (Session 6)
+  - src/query/fusion.rs - 完整实现
+  - 支持向量 + 全文混合搜索
+- [x] **高级全文配置** (Session 6)
+  - Language, stemming, stopwords, case sensitivity
+  - FullTextConfig enum (向后兼容)
+- [x] **Write-Ahead Log (WAL)** (Session 6)
+  - MessagePack + CRC32 格式
+  - 崩溃安全的写入
+  - 集成到 upsert 流程
 
 **✨ 当前可用功能**:
 - ✅ 创建 namespace (PUT /v1/namespaces/:namespace)
-- ✅ 插入文档 (POST /v1/namespaces/:namespace/upsert)
-- ✅ 向量查询 (POST /v1/namespaces/:namespace/query) - **返回完整文档！**
-- ✅ 缓存加速（segments 自动缓存到 Memory/Disk）
+- ✅ 插入文档 (POST /v1/namespaces/:namespace/upsert) - **带 WAL 保护！**
+- ✅ 向量查询 - 返回完整文档
+- ✅ 全文搜索 - BM25 + 多字段 + 权重
+- ✅ 混合搜索 - RRF 融合向量 + 全文结果
+- ✅ 属性过滤 - 所有常见操作符
+- ✅ 缓存加速 - segments 自动缓存到 Memory/Disk
 - ✅ 服务器运行在端口 3000
 
-### 🎯 下一步（Phase 2 - 高优先级）
+### 🎯 Phase 3: Production Readiness (下一步)
 
-### 📅 待办
-- [ ] **属性过滤执行器** - QueryRequest 类型已定义，需要实现执行逻辑
-- [ ] **Tantivy 全文搜索** - 集成 BM25
-- [ ] **混合搜索 RRF** - Late Fusion 融合算法
-- [ ] **WAL 写入日志** - 保证一致性（生产必需）
-- [ ] Tombstone 删除机制
-- [ ] LSM-tree 风格的 Compaction
-- [ ] 分布式支持
+#### 🔴 P0 - 生产必需
+1. **WAL Recovery** - 启动时重放未提交操作
+2. **WAL Rotation** - 防止 WAL 无限增长
+3. **Tantivy Analyzer Config** - 应用高级全文配置
+4. **Error Recovery** - 优雅处理损坏数据
+5. **Integration Tests** - 端到端测试
+
+#### 🟡 P1 - 性能与可靠性
+1. **LSM-tree Compaction** - 合并小 segments
+2. **Index Rebuild** - Compaction 后重建索引
+3. **Metrics & Monitoring** - Prometheus 指标
+4. **Benchmarks** - 性能测试套件
+5. **Query Optimizer** - 基于代价的查询计划
+
+#### 🟢 P2 - 高级功能
+1. **Distributed Mode** - 多节点部署
+2. **Replication** - 数据冗余
+3. **Snapshot & Restore** - 备份/恢复
+4. **Query Caching** - 缓存查询结果
+5. **Bulk Import** - 快速批量导入
 
 ---
 
@@ -53,17 +85,19 @@
 
 ### 关键特性
 1. **成本优化**: 使用 S3 存储冷数据，成本降低 100x
-2. **高性能**: RaBitQ 量化 + 多级缓存
+2. **高性能**: RaBitQ 量化 + 多级缓存 + RRF 融合
 3. **混合搜索**: 向量 + 全文 + 属性过滤
 4. **可扩展**: Serverless 友好架构
+5. **可靠性**: WAL 保证写入不丢失
 
 ### 技术栈
 - **存储**: S3 (aws-sdk-s3) + Local FS
 - **索引**: RaBitQ-rs (量化向量索引)
 - **缓存**: Foyer (memory + disk)
-- **全文**: Tantivy
+- **全文**: Tantivy (BM25)
 - **格式**: Arrow + Parquet (列式存储)
 - **API**: Axum
+- **WAL**: MessagePack + CRC32
 
 ---
 
@@ -74,20 +108,27 @@
 │         HTTP API (Axum)                 │
 ├─────────────────────────────────────────┤
 │  NamespaceManager (核心协调器)          │
-│  ├── WriteCoordinator                   │
-│  └── QueryExecutor                      │
+│  ├── WriteCoordinator (with WAL)        │
+│  └── QueryExecutor (with RRF)           │
 ├─────────────────────────────────────────┤
 │  Index Layer                            │
 │  ├── VectorIndex (RaBitQ)               │
-│  └── FullTextIndex (Tantivy)            │
+│  └── FullTextIndex (Tantivy BM25)       │
+├─────────────────────────────────────────┤
+│  Query Layer                            │
+│  ├── FilterExecutor (属性过滤)          │
+│  └── RRF Fusion (混合搜索)              │
 ├─────────────────────────────────────────┤
 │  Cache Layer (Foyer)                    │
-│  ├── Memory (4GB)                       │
-│  └── Disk (100GB NVMe)                  │
+│  ├── Memory (Manifest/Index)            │
+│  └── Disk (Segments)                    │
 ├─────────────────────────────────────────┤
 │  Segment Manager                        │
 │  ├── SegmentWriter (Parquet)            │
 │  └── SegmentReader (Parquet)            │
+├─────────────────────────────────────────┤
+│  WAL (Write-Ahead Log)                  │
+│  └── Crash-safe persistence             │
 ├─────────────────────────────────────────┤
 │  Storage Backend                        │
 │  ├── S3Storage                          │
@@ -105,54 +146,73 @@ src/
 │   ├── mod.rs           # API 路由
 │   └── handlers.rs      # HTTP handlers
 ├── cache/
-│   └── mod.rs           # Foyer 缓存封装
+│   └── mod.rs           # Foyer 缓存封装 ✅
 ├── index/
-│   ├── vector.rs        # RaBitQ 索引
-│   └── fulltext.rs      # Tantivy 索引
+│   ├── vector.rs        # RaBitQ 索引 ✅
+│   └── fulltext.rs      # Tantivy 索引 ✅
 ├── manifest/
-│   └── mod.rs           # Namespace 元数据
+│   └── mod.rs           # Namespace 元数据 ✅
 ├── segment/
-│   └── mod.rs           # Parquet 段管理
+│   └── mod.rs           # Parquet 段管理 ✅
 ├── storage/
-│   ├── mod.rs           # 存储抽象
-│   ├── s3.rs            # S3 实现
-│   └── local.rs         # 本地 FS 实现
+│   ├── mod.rs           # 存储抽象 ✅
+│   ├── s3.rs            # S3 实现 ✅
+│   └── local.rs         # 本地 FS 实现 ✅
 ├── query/
-│   └── mod.rs           # 查询类型定义
-├── types.rs             # 核心类型
-├── error.rs             # 错误类型
-├── lib.rs               # 库入口
-└── main.rs              # 服务器入口
+│   ├── mod.rs           # 查询类型定义 ✅
+│   ├── executor.rs      # 属性过滤器 ✅ NEW
+│   └── fusion.rs        # RRF 融合算法 ✅ NEW
+├── wal/
+│   └── mod.rs           # Write-Ahead Log ✅ NEW
+├── namespace/
+│   └── mod.rs           # Namespace 管理 ✅
+├── types.rs             # 核心类型 ✅
+├── error.rs             # 错误类型 ✅
+├── lib.rs               # 库入口 ✅
+└── main.rs              # 服务器入口 ✅
 ```
 
 ---
 
 ## 🔑 关键设计决策
 
-### 1. **写入流程**（参考 docs/DESIGN.md）
+### 1. **写入流程（带 WAL）**
 ```
-Client → Validation → Buffer → Flush to S3 → Async Index Update → Update Manifest
-```
-
-- **立即持久化**: 所有写入都直接 flush 到 S3，即使只有 1 条记录
-- **异步索引**: Segment 写入后立即返回，索引在后台更新
-- **Tombstone**: 删除通过标记实现，不物理删除
-
-### 2. **查询流程**
-```
-Load Manifest → Load Index → Search → Fetch Segments → Re-rank → Return
+Client → Validation →
+  ↓ WAL Write + Sync (durability!) →
+  ↓ Flush to S3 →
+  ↓ Update Index →
+  ↓ Update Manifest →
+  ↓ Truncate WAL →
+Return Success
 ```
 
-- **Late Fusion**: 向量搜索和全文搜索独立执行，最后用 RRF 融合
+- **WAL 优先**: 所有写入先写 WAL，fsync 后才继续
+- **原子提交**: Manifest 更新成功后才 truncate WAL
+- **崩溃恢复**: 启动时读取 WAL 重放未提交操作（TODO）
+
+### 2. **查询流程（带 RRF）**
+```
+Parse Request →
+  ↓ Apply Filter (if present) →
+  ↓ Vector Search (if present) →
+  ↓ Full-Text Search (if present) →
+  ↓ RRF Fusion →
+  ↓ Fetch Segments (with cache) →
+  ↓ Assemble Documents →
+Return Results
+```
+
+- **Late Fusion**: 向量和全文独立执行，RRF 合并结果
 - **缓存优先**: Manifest/Index 在 Memory，Segment 在 Disk
-- **Range Fetch**: 使用 S3 Range GET 只读取需要的行
+- **过滤器前置**: 先过滤再搜索，减少计算量
 
 ### 3. **RaBitQ 限制**
 - ❌ **不支持增量更新**: 添加新向量需要重建索引
 - ❌ **不支持删除**: 需要重建索引
 - ✅ **策略**: 新写入追加到新 segment，后台定期 compaction + 重建索引
 
-### 4. **Compaction 策略**（参考 LSM-tree）
+### 4. **Compaction 策略（待实现）**
 - **触发条件**: Segment 数量 > 100 或总大小超过阈值
 - **后台任务**: 合并小 segments → 重建索引 → 更新 manifest
 - **原子性**: 使用版本号 + 临时文件
@@ -206,7 +266,9 @@ mod tests {
 
 ### 文档
 - `docs/DESIGN.md` - **核心设计文档**（必读！）
-- `docs/README.md` - 快速开始指南
+- `docs/SESSION_5_SUMMARY.md` - Cache 集成总结
+- `docs/SESSION_6_SUMMARY.md` - 高级功能总结（RRF, WAL, 多字段）
+- `docs/FULLTEXT_COMPARISON.md` - Turbopuffer 全文对比
 - `README.md` - 项目首页
 - `CLAUDE.md` - 本文档
 
@@ -219,7 +281,16 @@ mod tests {
   "schema": {
     "vector_dim": 768,
     "vector_metric": "cosine",
-    "attributes": {...}
+    "attributes": {
+      "title": {
+        "type": "string",
+        "full_text": {
+          "language": "english",
+          "stemming": true,
+          "remove_stopwords": true
+        }
+      }
+    }
   },
   "segments": [
     {
@@ -244,71 +315,110 @@ mod tests {
 ```bash
 cd /data00/home/liuqin.v/workspace/elacsym
 cat CLAUDE.md                    # 读取本文档
-cat docs/DESIGN.md               # 查看设计文档
+cat docs/SESSION_6_SUMMARY.md   # 查看最新进展
 cargo check                      # 确认编译通过
 git status                       # 查看当前变更
 ```
 
-### 2. 当前优先级任务
+### 2. Phase 3 优先级任务
 
-#### 🔴 P0 - 核心功能（MVP 必需）
+#### 🔴 P0 - WAL Recovery (必须先做)
 
-**2.1 实现 Manifest 持久化**
-- 位置: `src/manifest/mod.rs`
-- 任务:
-  - [ ] 添加 `ManifestManager` 结构
-  - [ ] 实现 `load_manifest(namespace)` - 从 S3 读取
-  - [ ] 实现 `save_manifest(manifest)` - 写入 S3（原子性）
-  - [ ] 添加单元测试
-- 关键点: 使用 `{namespace}/manifest.json` 作为 key
+**位置**: `src/wal/mod.rs` + `src/namespace/mod.rs`
 
-**2.2 实现 Segment Parquet 读写**
-- 位置: `src/segment/mod.rs`
-- 任务:
-  - [ ] 完成 `documents_to_record_batch()` - Document → Arrow
-  - [ ] 完成 `read_parquet()` - Parquet → Document
-  - [ ] 处理 vector 列（FixedSizeList）
-  - [ ] 处理动态 attributes 列
-  - [ ] 添加集成测试
-- 难点: Arrow schema 动态生成
+**任务**:
+1. 实现 `WalManager::replay()`
+   - 读取所有 WAL entries
+   - 解析操作类型
+   - 返回待重放的操作列表
 
-**2.3 集成 RaBitQ**
-- 位置: `src/index/vector.rs`
-- 任务:
-  - [ ] 研究 rabitq-rs API（查看 docs.rs）
-  - [ ] 实现 `VectorIndex::new()` - 创建索引
-  - [ ] 实现 `add()` - 批量添加向量
-  - [ ] 实现 `search()` - ANN 搜索
-  - [ ] 实现序列化/反序列化
-  - [ ] 添加 benchmark
-- 参考: https://docs.rs/rabitq/0.2.2/rabitq/
+2. 更新 `Namespace::load()`
+   - 创建 WAL manager 后立即调用 replay()
+   - 对每个 Upsert 操作执行内部逻辑
+   - 完成后 truncate WAL
 
-**2.4 创建 NamespaceManager**
-- 位置: `src/namespace/mod.rs` (新文件)
-- 任务:
-  - [ ] 整合 Manifest + Storage + Index
-  - [ ] 实现 `create_namespace(schema)`
-  - [ ] 实现 `upsert(documents)` - 写入流程
-  - [ ] 实现 `query(request)` - 查询流程
-  - [ ] 使用 DashMap 缓存 Namespace 实例
+3. 添加测试
+   - 写入数据 → 不 truncate → 关闭 → 重新加载 → 验证数据完整
 
-**2.5 实现 API Handlers**
-- 位置: `src/api/handlers.rs`
-- 任务:
-  - [ ] 实现 `create_namespace()` - 连接 NamespaceManager
-  - [ ] 实现 `upsert()` - 调用 namespace.upsert()
-  - [ ] 实现 `query()` - 调用 namespace.query()
-  - [ ] 添加错误处理和日志
+**代码示例**:
+```rust
+impl WalManager {
+    pub async fn replay(&self) -> Result<Vec<WalOperation>> {
+        let entries = self.read_all().await?;
+        Ok(entries.into_iter().map(|e| e.operation).collect())
+    }
+}
 
-#### 🟡 P1 - 高级特性
-- Foyer 缓存集成
-- Tantivy 全文搜索
-- 混合搜索（RRF）
+impl Namespace {
+    pub async fn load(...) -> Result<Self> {
+        // ... 现有代码 ...
 
-#### 🟢 P2 - 优化
-- Compaction 后台任务
-- 性能优化
-- 监控和 metrics
+        let wal = WalManager::new(&wal_dir).await?;
+        let operations = wal.replay().await?;
+
+        for op in operations {
+            match op {
+                WalOperation::Upsert { documents } => {
+                    // 重放 upsert（不写 WAL，避免递归）
+                    self.upsert_internal(documents).await?;
+                }
+                _ => {}
+            }
+        }
+
+        // 重放完成，truncate WAL
+        wal.truncate().await?;
+
+        // ... 返回 ...
+    }
+}
+```
+
+#### 🔴 P0 - WAL Rotation
+
+**任务**:
+- 当 WAL 文件 > 100MB 时自动轮转
+- 保留最近 N 个 WAL 文件
+- Cleanup 旧 WAL 文件
+
+#### 🟡 P1 - Tantivy Analyzer Config
+
+**任务**:
+- 读取 `FullTextConfig` 设置
+- 根据 language 选择 Tantivy analyzer
+- 应用 stemming/stopwords 配置
+
+#### 🟡 P1 - LSM-tree Compaction
+
+**位置**: `src/namespace/compaction.rs` (新文件)
+
+**任务**:
+1. 实现 Compaction 触发逻辑
+   - 监控 segment 数量
+   - 后台任务定期检查
+
+2. 实现 Compaction 流程
+   - 选择需要合并的 segments
+   - 合并数据到新 segment
+   - 重建向量索引
+   - 原子更新 manifest
+   - 删除旧 segments
+
+3. 添加配置项
+   - `compaction.max_segments` = 100
+   - `compaction.interval_secs` = 3600
+
+#### 🟡 P1 - Metrics & Monitoring
+
+**位置**: `src/metrics/mod.rs` (新文件)
+
+**任务**:
+- Prometheus metrics
+  - query_duration_seconds (histogram)
+  - upsert_duration_seconds (histogram)
+  - cache_hit_rate (gauge)
+  - segment_count (gauge)
+  - wal_size_bytes (gauge)
 
 ### 3. 开发工作流
 
@@ -325,14 +435,14 @@ cargo test --lib <module>        # 单元测试
 cargo test --test <integration>  # 集成测试
 
 # 4. 更新文档
-# 更新 CLAUDE.md 的"已完成"部分
+# 更新 CLAUDE.md 的"变更日志"
 # 更新 README.md 的 Roadmap
-# 更新 docs/DESIGN.md（如有设计变更）
+# 创建 SESSION_N_SUMMARY.md
 
-# 5. 提交前检查
-cargo check
-cargo clippy -- -D warnings
-cargo fmt
+# 5. 提交
+git add -A
+git commit -m "..."
+git push
 ```
 
 ### 4. 常用命令
@@ -345,7 +455,7 @@ cargo check
 cargo test
 
 # 运行服务器
-cargo run
+ELACSYM_STORAGE_PATH=./data cargo run
 
 # 格式化代码
 cargo fmt
@@ -365,23 +475,32 @@ cargo update
 ## 🐛 已知问题和待解决
 
 ### 当前问题
-1. **Foyer API 变更**: foyer 0.12 的 API 与最新版本不兼容
-   - 临时方案: cache/mod.rs 中实现了 stub
-   - 计划: Phase 2 升级到 foyer 0.20+
+1. **WAL Recovery 未实现**
+   - 影响: 崩溃后可能丢失未提交数据
+   - 优先级: P0（生产必需）
 
-2. **RaBitQ 不支持增量更新**
+2. **WAL 无限增长**
+   - 影响: 磁盘空间耗尽
+   - 优先级: P0
+
+3. **Tantivy Analyzer 未配置**
+   - 影响: 高级全文配置不生效
+   - 优先级: P1
+
+4. **RaBitQ 不支持增量更新**
    - 影响: 每次添加向量需要重建索引
-   - 缓解: 批量写入 + 后台 compaction
+   - 缓解: Compaction 后重建
 
-3. **Parquet 动态 schema**
-   - 挑战: attributes 是动态的 HashMap
-   - 方案: 在 Manifest 中定义 schema，创建 Arrow schema
+5. **无 Compaction**
+   - 影响: Segment 数量无限增长
+   - 优先级: P1
 
 ### 技术债务
-- [ ] 添加更多单元测试
+- [ ] 添加更多集成测试
 - [ ] 实现 proper error recovery
 - [ ] 添加 tracing spans
 - [ ] 性能 profiling
+- [ ] API 文档（OpenAPI/Swagger）
 
 ---
 
@@ -390,6 +509,7 @@ cargo update
 ### 文档
 - [Turbopuffer Architecture](https://turbopuffer.com/docs/architecture)
 - [RaBitQ Paper](https://arxiv.org/abs/2405.12497)
+- [RRF Paper](https://dl.acm.org/doi/10.1145/1571941.1572114)
 - [Arrow Rust 文档](https://docs.rs/arrow/latest/arrow/)
 - [Parquet Rust 文档](https://docs.rs/parquet/latest/parquet/)
 - [Tantivy Book](https://docs.rs/tantivy/latest/tantivy/)
@@ -399,118 +519,94 @@ cargo update
 - foyer: https://docs.rs/foyer/0.12.2/foyer/
 - axum: https://docs.rs/axum/latest/axum/
 - aws-sdk-s3: https://docs.rs/aws-sdk-s3/latest/aws_sdk_s3/
+- tantivy: https://docs.rs/tantivy/latest/tantivy/
+- rmp-serde: https://docs.rs/rmp-serde/latest/rmp_serde/
 
 ---
 
 ## 🔄 变更日志
 
+### 2025-10-05 (Session 6 - 高级功能完成 🎉)
+- ✅ 实现多字段全文搜索
+  - FullTextQuery enum (Single/Multi 变体)
+  - 每字段可配置权重
+  - 自动聚合多字段结果
+- ✅ 实现 RRF 融合算法
+  - `src/query/fusion.rs` - 215 行
+  - 标准 k=60 参数
+  - 支持可配置权重
+  - 8 个单元测试
+- ✅ 实现高级全文配置
+  - FullTextConfig enum (向后兼容)
+  - 支持 language, stemming, stopwords, case_sensitive
+  - Helper 方法: is_enabled(), language(), 等
+- ✅ 实现 Write-Ahead Log
+  - `src/wal/mod.rs` - 404 行
+  - MessagePack + CRC32 格式
+  - append(), sync(), truncate()
+  - 4 个单元测试（包括崩溃恢复）
+- ✅ WAL 集成到 upsert 流程
+  - WAL write → segment write → WAL truncate
+  - 保证写入不丢失
+- ✅ 更新文档
+  - SESSION_6_SUMMARY.md (521 行)
+  - 更新 README.md roadmap
+  - 更新 CLAUDE.md
+
+**代码统计**: +3696 行, 17 个新测试
+
 ### 2025-10-05 (Session 5 - 查询流程完善 + 缓存集成 ✅)
-- ✅ 实现 Segment 文档读取功能
-  - `SegmentReader::read_documents_by_ids()` - 按 ID 过滤读取
-  - 利用 HashSet 高效查找
+- ✅ 实现 Segment 文档读取
+  - `read_documents_by_ids()` - HashSet 过滤
 - ✅ 实现 Foyer 缓存集成
-  - `CacheManager` 完整实现（替换 stub）
   - Memory + Disk 两层缓存
-  - `get_or_fetch()` 模式简化缓存逻辑
-  - 缓存键设计：`manifest:{ns}`, `vidx:{ns}`, `seg:{ns}:{seg_id}`
+  - `get_or_fetch()` 模式
+- ✅ 实现属性过滤
+  - FilterExecutor - 318 行
+  - 所有常见操作符
+  - 5 个单元测试
 - ✅ 更新 Namespace::query() 完整流程
-  - Step 1: 向量索引搜索 → 候选 doc_ids
-  - Step 2: 按 segment 分组
-  - Step 3: 从缓存/存储读取 segment 数据
-  - Step 4: 提取文档并按顺序返回
-- ✅ 更新 API handlers
-  - 支持 `include_vector` / `include_attributes` 控制返回字段
-  - 查询响应包含完整文档数据
 - ✅ 集成到 main.rs
-  - 环境变量 `ELACSYM_CACHE_PATH` 配置缓存路径
-  - 环境变量 `ELACSYM_DISABLE_CACHE` 可禁用缓存
-  - 缓存初始化失败时降级为无缓存模式
-- ✅ 更新文档（README + CLAUDE.md）
+  - 环境变量配置
 
-**技术亮点**:
-- **缓存策略学习 Turbopuffer**: Segment 数据缓存到 Disk，Manifest/Index 缓存到 Memory
-- **查询流程完整**: 不再只返回 ID，而是完整的 Document 对象
-- **优雅降级**: 缓存不可用时自动回退到直接存储读取
-- **环境变量配置**: 灵活控制缓存行为
-
-**测试状态**: 11/11 单元测试通过（新增 3 个缓存测试）
+**测试状态**: 11/11 单元测试通过
 
 ### 2025-10-05 (Session 4 - HTTP API 完成 ✅)
-- ✅ 实现 NamespaceManager 状态管理
-  - 多 namespace 管理与缓存
-  - create_namespace / get_namespace / list_namespaces
-- ✅ 实现 HTTP API handlers (`src/api/handlers.rs`)
-  - create_namespace (PUT /v1/namespaces/:namespace)
-  - upsert (POST /v1/namespaces/:namespace/upsert)
-  - query (POST /v1/namespaces/:namespace/query)
-- ✅ 更新 main.rs 集成 Axum 服务器
-  - NamespaceManager 作为 State
-  - 环境变量 ELACSYM_STORAGE_PATH 配置
-- ✅ HTTP API 端到端测试
-  - ✅ 健康检查
-  - ✅ 创建 namespace
-  - ✅ 插入 3 个文档
-  - ✅ 向量查询 (67ms 响应)
-- ✅ 添加 InvalidRequest 错误类型
-- ✅ 更新文档（README 标记 **MVP 100% 完成**）
+- ✅ NamespaceManager 状态管理
+- ✅ HTTP API handlers
+- ✅ Axum 服务器集成
+- ✅ 端到端测试通过
 
-**技术亮点**:
-- Axum State pattern 实现依赖注入
-- 错误处理使用 (StatusCode, String) 元组
-- Query 响应包含耗时统计（took_ms）
-- **🎉 Phase 1 MVP 完成！服务器运行正常！**
-
-**测试结果**: 8/8 单元测试通过 + HTTP API 集成测试通过
+**测试状态**: 8/8 测试通过
 
 ### 2025-10-05 (Session 3 - 深夜)
-- ✅ 实现 RaBitQ 向量索引集成（`src/index/vector.rs`）
-- ✅ 实现 Namespace 管理器（`src/namespace/mod.rs`）
-- ✅ 添加向量索引测试（2个测试通过）
-- ✅ 添加 Namespace 测试（2个测试通过）
-- ✅ 所有测试通过（8/8 tests passed）
+- ✅ RaBitQ 向量索引集成
+- ✅ Namespace 管理器
+- ✅ 向量搜索功能
 
-**技术亮点**:
-- **RaBitQ 包装层**: 处理不支持增量更新的限制
-  - 存储原始向量用于重建索引
-  - DocId 映射（external ID ↔ internal index）
-  - 懒加载索引构建
-  - 自动生成质心（k-means++ style）
-  - fvecs 文件格式写入
-- **Namespace 整合**: 统一管理 Manifest + Storage + Index + Segments
-  - 并发安全（RwLock）
-  - 完整的 upsert 流程
-  - 向量搜索功能
-
-**代码统计**: ~800 行新代码，8 个测试全部通过
+**代码统计**: ~800 行, 8 个测试通过
 
 ### 2025-10-05 (Session 2 - 晚上)
-- ✅ 实现 ManifestManager 持久化（S3 读写）
-- ✅ 实现 Segment Parquet 读写（完整的 Arrow 转换）
-- ✅ 添加 Manifest 和 Segment 单元测试（全部通过）
-- ✅ 更新 CLAUDE.md 和 README.md
-
-**技术亮点**:
-- Parquet 动态 schema 处理（支持动态attributes）
-- FixedSizeList 处理向量字段
-- Bytes 直接实现 ChunkReader（无需 Cursor）
+- ✅ ManifestManager 持久化
+- ✅ Segment Parquet 读写
+- ✅ 单元测试
 
 ### 2025-10-05 (Session 1 - 早上)
-- ✅ 初始化项目结构
-- ✅ 实现 Storage 抽象层（S3 + Local FS）
-- ✅ 完成核心类型定义
-- ✅ 编写设计文档 (docs/DESIGN.md)
-- ✅ 创建 CLAUDE.md 工作指南
+- ✅ 项目初始化
+- ✅ Storage 抽象层
+- ✅ 核心类型定义
+- ✅ 设计文档
 
 ---
 
 ## 💡 提示
 
 ### 给未来的 Claude
-1. **先读设计文档**: docs/DESIGN.md 有完整的写入/查询流程
-2. **保持一致性**: 遵循现有的代码风格和错误处理模式
-3. **测试优先**: 每个模块都应该有测试
-4. **更新文档**: 完成功能后更新 CLAUDE.md 和 README.md
-5. **性能意识**: 这是一个性能敏感的项目，注意避免不必要的拷贝和分配
+1. **优先 WAL Recovery**: 这是 P0 任务，必须先实现
+2. **参考 SESSION_6_SUMMARY.md**: 有详细的实现细节
+3. **保持测试覆盖**: 每个新功能都要有测试
+4. **更新文档**: 完成后创建 SESSION_N_SUMMARY.md
+5. **性能意识**: 这是性能敏感项目
 
 ### 调试技巧
 ```bash
@@ -529,8 +625,8 @@ perf record ./target/release/elacsym
 - ❌ 忘记 `.await` 在异步函数中
 - ❌ 使用 `unwrap()` 而不是 `?`
 - ❌ 在 trait 中忘记 `Send + Sync`
-- ❌ Parquet 文件路径使用绝对路径（应该相对于 namespace）
+- ❌ WAL 和 upsert 递归调用（分离 upsert_internal）
 
 ---
 
-**祝编码愉快！记得经常提交并更新文档。**
+**祝编码愉快！Phase 3 加油！🚀**
