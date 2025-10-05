@@ -232,9 +232,9 @@ disk_size = 107374182400  # 100GB
 - [x] **Integration Tests** - End-to-end testing (47/47 tests passing) ✅
 - [x] **Tantivy Analyzer Config** - Apply advanced full-text settings ✅
 
-#### P1 - Performance & Reliability
-- [ ] **LSM-tree Compaction** - Merge small segments
-- [ ] **Index Rebuild** - Rebuild vector index after compaction
+#### P1 - Performance & Reliability (20% Complete)
+- [x] **LSM-tree Compaction** - Merge small segments ✅
+- [x] **Index Rebuild** - Rebuild vector index after compaction ✅
 - [ ] **Metrics & Monitoring** - Prometheus metrics
 - [ ] **Benchmarks** - Performance testing suite
 - [ ] **Query Optimizer** - Cost-based query planning
@@ -273,6 +273,22 @@ disk_size = 107374182400  # 100GB
 - **WAL**: MessagePack + CRC32
 
 ## Recent Updates
+
+### Session 9 (2025-10-05) - LSM-tree Compaction 📦
+- ✅ **Compaction Trigger Logic** - Auto-trigger when >100 segments or >1M docs
+- ✅ **Segment Merging** - Merge smallest N segments into single segment
+- ✅ **Index Rebuild** - Rebuild vector and full-text indexes after compaction
+- ✅ **Atomic Updates** - Manifest version increment with rollback safety
+- ✅ **Integration Tests** - 3 comprehensive compaction tests (all passing)
+- ✅ **All Tests Passing** - 50/50 tests (35 unit + 3 compaction + 6 analyzer + 4 WAL error + 2 WAL recovery)
+
+**P1-1 Complete!** Database now has automatic segment compaction to prevent performance degradation from too many small segments.
+
+**Compaction Features**:
+- Merges up to 10 smallest segments
+- Preserves all data and indexes
+- Automatic old file cleanup
+- Public `segment_count()` API for monitoring
 
 ### Session 8 (2025-10-05) - Tantivy Custom Analyzers 🔍
 - ✅ **Custom Analyzer API** - `FullTextIndex::new_with_config()` accepting `FullTextConfig`
