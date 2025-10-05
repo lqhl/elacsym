@@ -6,7 +6,6 @@
 //! - Vector Index (RaBitQ)
 //! - Segments (Parquet files)
 
-use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -113,7 +112,7 @@ impl Namespace {
 
         // Create/Load WAL
         let wal_dir = format!("wal/{}", name);
-        let mut wal = WalManager::new(&wal_dir).await?;
+        let wal = WalManager::new(&wal_dir).await?;
 
         // Create the namespace instance first
         let namespace = Self {
@@ -600,7 +599,7 @@ impl NamespaceManager {
 mod tests {
     use super::*;
     use crate::storage::local::LocalStorage;
-    use crate::types::{AttributeSchema, AttributeType, AttributeValue, DistanceMetric};
+    use crate::types::{AttributeSchema, AttributeType, AttributeValue, DistanceMetric, FullTextConfig};
     use std::collections::HashMap;
     use tempfile::TempDir;
 
@@ -615,7 +614,7 @@ mod tests {
             AttributeSchema {
                 attr_type: AttributeType::String,
                 indexed: false,
-                full_text: true,
+                full_text: FullTextConfig::Simple(true),
             },
         );
 
@@ -676,7 +675,7 @@ mod tests {
             AttributeSchema {
                 attr_type: AttributeType::String,
                 indexed: false,
-                full_text: false,
+                full_text: FullTextConfig::Simple(false),
             },
         );
 
@@ -754,7 +753,7 @@ mod tests {
             AttributeSchema {
                 attr_type: AttributeType::String,
                 indexed: false,
-                full_text: false,
+                full_text: FullTextConfig::Simple(false),
             },
         );
         attributes.insert(
@@ -762,7 +761,7 @@ mod tests {
             AttributeSchema {
                 attr_type: AttributeType::String,
                 indexed: true,
-                full_text: false,
+                full_text: FullTextConfig::Simple(false),
             },
         );
         attributes.insert(
@@ -770,7 +769,7 @@ mod tests {
             AttributeSchema {
                 attr_type: AttributeType::Float,
                 indexed: false,
-                full_text: false,
+                full_text: FullTextConfig::Simple(false),
             },
         );
 
@@ -882,7 +881,7 @@ mod tests {
             AttributeSchema {
                 attr_type: AttributeType::String,
                 indexed: false,
-                full_text: true, // Enable full-text search
+                full_text: FullTextConfig::Simple(true), // Enable full-text search
             },
         );
 
@@ -936,7 +935,7 @@ mod tests {
         ns.upsert(docs).await.unwrap();
 
         // Full-text search for "rust"
-        let ft_query = crate::query::FullTextQuery {
+        let ft_query = crate::query::FullTextQuery::Single {
             field: "title".to_string(),
             query: "rust".to_string(),
             weight: 1.0,
@@ -963,13 +962,13 @@ mod tests {
             AttributeSchema {
                 attr_type: AttributeType::String,
                 indexed: false,
-                full_text: true,
+                full_text: FullTextConfig::Simple(true),
             },
         );
 
         let schema = Schema {
             vector_dim: 64,
-            vector_metric: DistanceMetric::Cosine,
+            vector_metric: DistanceMetric::L2, // RaBitQ only supports L2
             attributes,
         };
 
@@ -1018,7 +1017,7 @@ mod tests {
 
         // Hybrid search: vector + full-text
         let query_vector = vec![1.0; 64];
-        let ft_query = crate::query::FullTextQuery {
+        let ft_query = crate::query::FullTextQuery::Single {
             field: "content".to_string(),
             query: "learning".to_string(),
             weight: 0.5,

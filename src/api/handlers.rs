@@ -17,7 +17,8 @@ use crate::types::{Document, Schema};
 pub async fn health(
     State(manager): State<Arc<NamespaceManager>>,
 ) -> Result<Json<HealthResponse>, (StatusCode, String)> {
-    let namespaces = manager.list_namespaces().await;
+    let namespaces = manager.list_namespaces().await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(HealthResponse {
         status: "healthy".to_string(),

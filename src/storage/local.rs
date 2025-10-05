@@ -2,11 +2,11 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-use crate::{Error, Result};
+use crate::Result;
 
 use super::StorageBackend;
 

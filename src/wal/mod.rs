@@ -3,7 +3,7 @@
 //! Provides crash-safe writes by logging operations before they're committed.
 //! Inspired by Turbopuffer's WAL design.
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs::{File, OpenOptions};

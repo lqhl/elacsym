@@ -40,7 +40,7 @@ impl FullTextIndex {
         // Create reader with auto-reload
         let reader = index
             .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommit)
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
             .try_into()
             .map_err(|e| Error::internal(format!("Failed to create index reader: {}", e)))?;
 
@@ -79,7 +79,7 @@ impl FullTextIndex {
 
         let reader = index
             .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommit)
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
             .try_into()
             .map_err(|e| Error::internal(format!("Failed to create index reader: {}", e)))?;
 
@@ -115,6 +115,11 @@ impl FullTextIndex {
             .commit()
             .map_err(|e| Error::internal(format!("Failed to commit index: {}", e)))?;
 
+        // Reload reader to see committed changes
+        self.reader
+            .reload()
+            .map_err(|e| Error::internal(format!("Failed to reload index reader: {}", e)))?;
+
         Ok(())
     }
 
@@ -143,7 +148,7 @@ impl FullTextIndex {
         // Extract results
         let mut results = Vec::new();
         for (score, doc_address) in top_docs {
-            let doc = searcher
+            let doc: TantivyDocument = searcher
                 .doc(doc_address)
                 .map_err(|e| Error::internal(format!("Failed to retrieve document: {}", e)))?;
 

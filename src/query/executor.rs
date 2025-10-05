@@ -1,10 +1,6 @@
 //! Query executor for attribute filtering
 
-use arrow::array::{Array, ArrayRef, BooleanArray, Int64Array, Float64Array, StringArray};
-use arrow::compute;
-use bytes::Bytes;
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use crate::query::{FilterCondition, FilterExpression, FilterOp};
 use crate::segment::{SegmentReader, SegmentWriter};

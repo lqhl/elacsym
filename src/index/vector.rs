@@ -2,7 +2,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use crate::types::{DistanceMetric, DocId, Vector};
 use crate::{Error, Result};

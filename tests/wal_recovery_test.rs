@@ -1,6 +1,6 @@
 use elacsym::namespace::Namespace;
-use elacsym::storage::LocalStorage;
-use elacsym::types::{AttributeValue, DistanceMetric, Document, Schema};
+use elacsym::storage::local::LocalStorage;
+use elacsym::types::{AttributeValue, DistanceMetric, Document, FullTextConfig, Schema};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -18,13 +18,13 @@ async fn test_wal_recovery_after_crash() {
         elacsym::types::AttributeSchema {
             attr_type: elacsym::types::AttributeType::String,
             indexed: false,
-            full_text: elacsym::types::FullTextConfig::Simple(false),
+            full_text: FullTextConfig::Simple(false),
         },
     );
 
     let schema = Schema {
         vector_dim: 3,
-        vector_metric: DistanceMetric::Cosine,
+        vector_metric: DistanceMetric::L2,
         attributes,
     };
 
@@ -52,7 +52,7 @@ async fn test_wal_recovery_after_crash() {
     ];
 
     // Create namespace
-    let storage = Arc::new(LocalStorage::new(storage_path.clone()));
+    let storage = Arc::new(LocalStorage::new(storage_path.clone()).unwrap());
     let namespace = Namespace::create(
         namespace_name.clone(),
         schema.clone(),
@@ -86,7 +86,7 @@ async fn test_wal_recovery_after_crash() {
     drop(namespace);
 
     // Step 2: Reload namespace - WAL should be replayed
-    let storage2 = Arc::new(LocalStorage::new(storage_path));
+    let storage2 = Arc::new(LocalStorage::new(storage_path).unwrap());
     let namespace2 = Namespace::load(namespace_name, storage2, None)
         .await
         .unwrap();
@@ -129,12 +129,12 @@ async fn test_wal_empty_after_successful_upsert() {
     // Create schema
     let schema = Schema {
         vector_dim: 3,
-        vector_metric: DistanceMetric::Cosine,
+        vector_metric: DistanceMetric::L2,
         attributes: HashMap::new(),
     };
 
     // Create namespace
-    let storage = Arc::new(LocalStorage::new(storage_path.clone()));
+    let storage = Arc::new(LocalStorage::new(storage_path.clone()).unwrap());
     let namespace = Namespace::create(
         "test_wal_truncate".to_string(),
         schema,

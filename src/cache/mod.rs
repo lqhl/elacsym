@@ -5,7 +5,7 @@
 //! - Disk cache: For segment data (warm data)
 
 use bytes::Bytes;
-use foyer::{Cache, CacheBuilder, DirectFsDeviceOptions};
+use foyer::{Cache, CacheBuilder};
 use std::sync::Arc;
 
 use crate::Result;
@@ -36,15 +36,10 @@ pub struct CacheManager {
 impl CacheManager {
     /// Create a new cache manager
     pub async fn new(config: CacheConfig) -> Result<Self> {
-        // Build hybrid cache with memory and disk layers
+        // Build memory-only cache (foyer 0.12 API)
         let cache = CacheBuilder::new(config.memory_size)
             .with_shards(16) // Shard for concurrency
-            .storage()
-            .with_capacity(config.disk_size)
-            .with_device_options(DirectFsDeviceOptions::new(&config.disk_path))
-            .build()
-            .await
-            .map_err(|e| crate::Error::internal(format!("Failed to build cache: {}", e)))?;
+            .build();
 
         Ok(Self {
             cache: Arc::new(cache),
@@ -53,17 +48,17 @@ impl CacheManager {
 
     /// Get value from cache
     pub async fn get(&self, key: &str) -> Option<Bytes> {
-        self.cache.get(&key.to_string()).await
+        self.cache.get(&key.to_string()).map(|entry| entry.value().clone())
     }
 
     /// Put value into cache
     pub async fn put(&self, key: String, value: Bytes) {
-        self.cache.insert(key, value).await;
+        self.cache.insert(key, value);
     }
 
     /// Remove value from cache
     pub async fn remove(&self, key: &str) {
-        self.cache.remove(&key.to_string()).await;
+        self.cache.remove(&key.to_string());
     }
 
     /// Get or fetch value (with callback for cache miss)

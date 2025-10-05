@@ -8,7 +8,7 @@ use arrow::array::{
     Int64Array, Int64Builder, RecordBatch, StringArray, StringBuilder,
     UInt64Array, UInt64Builder,
 };
-use arrow::datatypes::{DataType, Field, Float32Type, Schema as ArrowSchema};
+use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use bytes::Bytes;
 use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
 use parquet::file::properties::WriterProperties;
@@ -21,7 +21,7 @@ use crate::{Error, Result};
 /// Segment writer for creating Parquet files
 pub struct SegmentWriter {
     schema: Schema,
-    arrow_schema: Arc<ArrowSchema>,
+    pub arrow_schema: Arc<ArrowSchema>,
 }
 
 impl SegmentWriter {
@@ -368,7 +368,7 @@ impl SegmentReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AttributeSchema, DistanceMetric};
+    use crate::types::{AttributeSchema, DistanceMetric, FullTextConfig};
 
     #[test]
     fn test_parquet_roundtrip() {
@@ -378,7 +378,7 @@ mod tests {
             AttributeSchema {
                 attr_type: AttributeType::String,
                 indexed: false,
-                full_text: true,
+                full_text: FullTextConfig::Simple(true),
             },
         );
         schema_attrs.insert(
@@ -386,7 +386,7 @@ mod tests {
             AttributeSchema {
                 attr_type: AttributeType::Float,
                 indexed: false,
-                full_text: false,
+                full_text: FullTextConfig::Simple(false),
             },
         );
 
