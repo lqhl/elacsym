@@ -6,7 +6,7 @@
 //! - Vector Index (RaBitQ)
 //! - Segments (Parquet files)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -16,7 +16,7 @@ use crate::manifest::{Manifest, ManifestManager};
 use crate::query::{fusion, FilterExecutor, FilterExpression, FullTextQuery};
 use crate::segment::{SegmentReader, SegmentWriter};
 use crate::storage::StorageBackend;
-use crate::types::{AttributeValue, Document, Schema, SegmentInfo};
+use crate::types::{AttributeValue, Document, FullTextConfig, Schema, SegmentInfo};
 use crate::wal::{WalManager, WalOperation};
 use crate::{Error, Result};
 
@@ -481,6 +481,12 @@ impl Namespace {
         manifest.stats.clone()
     }
 
+    /// Get the number of segments
+    pub async fn segment_count(&self) -> usize {
+        let manifest = self.manifest.read().await;
+        manifest.segments.len()
+    }
+
     /// Merge vector and full-text search results using RRF
     ///
     /// Uses Reciprocal Rank Fusion algorithm to combine results from
@@ -507,6 +513,198 @@ impl Namespace {
             60.0, // RRF constant k
             top_k,
         )
+    }
+
+    /// Check if compaction is needed
+    ///
+    /// Compaction is triggered when:
+    /// - Number of segments > 100, OR
+    /// - Total segment size > 1GB
+    pub async fn should_compact(&self) -> bool {
+        let manifest = self.manifest.read().await;
+
+        // Trigger if too many segments
+        if manifest.segments.len() > 100 {
+            return true;
+        }
+
+        // Trigger if total size exceeds threshold (1GB)
+        let total_size: usize = manifest.segments.iter().map(|s| s.row_count).sum();
+        total_size > 1_000_000 // 1M documents ~= 1GB with average doc size
+    }
+
+    /// Perform compaction to merge small segments
+    ///
+    /// This implements LSM-tree style compaction:
+    /// 1. Select smallest N segments to merge
+    /// 2. Read all documents from selected segments
+    /// 3. Write merged data to new segment
+    /// 4. Rebuild vector and full-text indexes
+    /// 5. Atomically update manifest
+    /// 6. Delete old segment files
+    pub async fn compact(&self) -> Result<()> {
+        tracing::info!("Starting compaction for namespace: {}", self.name);
+
+        // Step 1: Select segments to merge (smallest 10 segments)
+        let segments_to_merge = {
+            let manifest = self.manifest.read().await;
+
+            if manifest.segments.len() < 2 {
+                tracing::info!("Not enough segments to compact");
+                return Ok(());
+            }
+
+            // Sort by size and select smallest segments (up to 10)
+            let mut sorted_segments = manifest.segments.clone();
+            sorted_segments.sort_by_key(|s| s.row_count);
+            sorted_segments.truncate(10);
+            sorted_segments
+        };
+
+        tracing::info!("Merging {} segments", segments_to_merge.len());
+
+        // Step 2: Read all documents from selected segments
+        let mut all_documents = Vec::new();
+        for segment_info in &segments_to_merge {
+            let data = self.storage.get(&segment_info.file_path).await?;
+
+            let schema = self.manifest.read().await.schema.clone();
+            let reader = SegmentReader::new(SegmentWriter::new(schema)?.arrow_schema);
+            let docs = reader.read_parquet(data)?;
+            all_documents.extend(docs);
+        }
+
+        tracing::info!("Read {} documents from segments", all_documents.len());
+
+        // Step 3: Write merged data to new segment
+        let new_segment_id = format!("seg_{}", uuid::Uuid::new_v4());
+        let segment_path = format!("{}/segments/{}.parquet", self.name, new_segment_id);
+
+        let schema = self.manifest.read().await.schema.clone();
+        let writer = SegmentWriter::new(schema)?;
+        let parquet_data = writer.write_parquet(&all_documents)?;
+
+        // Write to storage
+        self.storage.put(&segment_path, parquet_data).await?;
+
+        // Calculate ID range
+        let ids: Vec<u64> = all_documents.iter().map(|d| d.id).collect();
+        let min_id = *ids.iter().min().unwrap();
+        let max_id = *ids.iter().max().unwrap();
+
+        // Create segment info
+        let segment_info = SegmentInfo {
+            segment_id: new_segment_id.clone(),
+            file_path: segment_path.clone(),
+            row_count: all_documents.len(),
+            id_range: (min_id, max_id),
+            created_at: chrono::Utc::now(),
+            tombstones: Vec::new(),
+        };
+
+        tracing::info!("Wrote merged segment: {}", new_segment_id);
+
+        // Step 4: Rebuild indexes with merged segment data only
+        // Note: We only rebuild with documents from merged segments, not all documents
+        {
+            let manifest = self.manifest.read().await;
+
+            // Rebuild vector index
+            let mut vector_index = self.vector_index.write().await;
+
+            // Collect vectors and IDs
+            let mut ids = Vec::new();
+            let mut vectors = Vec::new();
+            for doc in &all_documents {
+                if let Some(vector) = &doc.vector {
+                    ids.push(doc.id);
+                    vectors.push(vector.clone());
+                }
+            }
+
+            // Add to index (this will trigger rebuild internally)
+            if !ids.is_empty() {
+                vector_index.add(&ids, &vectors)?;
+                tracing::info!("Rebuilt vector index with {} vectors", ids.len());
+            }
+
+            // Rebuild full-text indexes
+            let mut fulltext_indexes = self.fulltext_indexes.write().await;
+            for (field_name, index) in fulltext_indexes.iter_mut() {
+                let mut field_docs = Vec::new();
+                for doc in &all_documents {
+                    if let Some(AttributeValue::String(text)) = doc.attributes.get(field_name) {
+                        field_docs.push((doc.id, text.clone()));
+                    }
+                }
+
+                if !field_docs.is_empty() {
+                    // Recreate index with all documents
+                    // Note: This is inefficient, but Tantivy doesn't support bulk delete
+                    // In production, we'd create a new index and swap
+                    *index = FullTextIndex::new_with_config(
+                        field_name.clone(),
+                        manifest
+                            .schema
+                            .attributes
+                            .get(field_name)
+                            .map(|a| a.full_text.clone())
+                            .unwrap_or(FullTextConfig::Simple(false)),
+                    )?;
+                    index.add_documents(&field_docs)?;
+
+                    tracing::info!(
+                        "Rebuilt full-text index for field '{}' with {} docs",
+                        field_name,
+                        field_docs.len()
+                    );
+                }
+            }
+        }
+
+        // Step 5: Atomically update manifest
+        {
+            let mut manifest = self.manifest.write().await;
+
+            // Remove old segments
+            let old_segment_ids: HashSet<_> = segments_to_merge
+                .iter()
+                .map(|s| s.segment_id.clone())
+                .collect();
+            manifest
+                .segments
+                .retain(|s| !old_segment_ids.contains(&s.segment_id));
+
+            // Add new segment
+            manifest.segments.push(segment_info);
+            manifest.version += 1;
+
+            // Update stats
+            let total_docs: usize = manifest.segments.iter().map(|s| s.row_count).sum();
+            manifest.stats.total_docs = total_docs;
+
+            // Save manifest
+            let manifest_path = format!("{}/manifest.json", self.name);
+            let manifest_json = serde_json::to_vec_pretty(&*manifest)
+                .map_err(|e| Error::internal(format!("Failed to serialize manifest: {}", e)))?;
+            self.storage
+                .put(&manifest_path, manifest_json.into())
+                .await?;
+        }
+
+        tracing::info!("Updated manifest after compaction");
+
+        // Step 6: Delete old segment files
+        for segment_info in &segments_to_merge {
+            let path = format!("{}/{}", self.name, segment_info.file_path);
+            if let Err(e) = self.storage.delete(&path).await {
+                tracing::warn!("Failed to delete old segment {}: {}", path, e);
+                // Don't fail compaction if cleanup fails
+            }
+        }
+
+        tracing::info!("Compaction completed successfully");
+        Ok(())
     }
 }
 
