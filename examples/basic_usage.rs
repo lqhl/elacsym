@@ -3,7 +3,8 @@
 use elacsym::namespace::Namespace;
 use elacsym::storage::local::LocalStorage;
 use elacsym::types::{
-    AttributeSchema, AttributeType, AttributeValue, DistanceMetric, Document, Schema,
+    AttributeSchema, AttributeType, AttributeValue, DistanceMetric, Document, FullTextConfig,
+    Schema,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,7 +25,7 @@ async fn main() -> elacsym::Result<()> {
         AttributeSchema {
             attr_type: AttributeType::String,
             indexed: false,
-            full_text: true,
+            full_text: FullTextConfig::Simple(true),
         },
     );
     attributes.insert(
@@ -32,7 +33,7 @@ async fn main() -> elacsym::Result<()> {
         AttributeSchema {
             attr_type: AttributeType::String,
             indexed: true,
-            full_text: false,
+            full_text: FullTextConfig::Simple(false),
         },
     );
     attributes.insert(
@@ -40,7 +41,7 @@ async fn main() -> elacsym::Result<()> {
         AttributeSchema {
             attr_type: AttributeType::Float,
             indexed: false,
-            full_text: false,
+            full_text: FullTextConfig::Simple(false),
         },
     );
 
@@ -52,7 +53,7 @@ async fn main() -> elacsym::Result<()> {
 
     // 3. Create namespace
     println!("Creating namespace 'my_docs'...");
-    let namespace = Namespace::create("my_docs".to_string(), schema, storage.clone()).await?;
+    let namespace = Namespace::create("my_docs".to_string(), schema, storage.clone(), None).await?;
     println!("✓ Namespace created\n");
 
     // 4. Insert documents
@@ -141,14 +142,14 @@ async fn main() -> elacsym::Result<()> {
     // 6. Query for similar vectors
     println!("Querying for vectors similar to [1.2, 1.2, ...]...");
     let query_vector = vec![1.2; 128];
-    let results = namespace.query(&query_vector, 3).await?;
+    let results = namespace.query(Some(&query_vector), None, 3, None).await?;
 
     println!("Top 3 results:");
-    for (i, (doc_id, distance)) in results.iter().enumerate() {
+    for (i, (doc, distance)) in results.iter().enumerate() {
         println!(
             "  {}. Document ID: {}, Distance: {:.4}",
             i + 1,
-            doc_id,
+            doc.id,
             distance
         );
     }
@@ -157,14 +158,14 @@ async fn main() -> elacsym::Result<()> {
     // 7. Query with different vector
     println!("Querying for vectors similar to [2.8, 2.8, ...]...");
     let query_vector2 = vec![2.8; 128];
-    let results2 = namespace.query(&query_vector2, 2).await?;
+    let results2 = namespace.query(Some(&query_vector2), None, 2, None).await?;
 
     println!("Top 2 results:");
-    for (i, (doc_id, distance)) in results2.iter().enumerate() {
+    for (i, (doc, distance)) in results2.iter().enumerate() {
         println!(
             "  {}. Document ID: {}, Distance: {:.4}",
             i + 1,
-            doc_id,
+            doc.id,
             distance
         );
     }
