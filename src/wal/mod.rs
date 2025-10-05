@@ -55,8 +55,12 @@ pub struct WalManager {
     current_file: File,
     /// Current WAL file path
     current_path: PathBuf,
-    /// Next sequence number
+    /// Current file sequence number
+    file_sequence: u64,
+    /// Next entry sequence number
     next_sequence: u64,
+    /// Maximum WAL file size before rotation (default: 100MB)
+    max_file_size: u64,
 }
 
 impl WalManager {
@@ -108,12 +112,98 @@ impl WalManager {
             wal_dir,
             current_file,
             current_path,
+            file_sequence: 0,
             next_sequence,
+            max_file_size: 100 * 1024 * 1024, // 100MB default
         })
+    }
+
+    /// Check if WAL file should be rotated
+    async fn should_rotate(&self) -> Result<bool> {
+        let metadata = self.current_file.metadata().await
+            .map_err(|e| Error::internal(format!("Failed to get file metadata: {}", e)))?;
+        Ok(metadata.len() >= self.max_file_size)
+    }
+
+    /// Rotate to a new WAL file
+    async fn rotate(&mut self) -> Result<()> {
+        // Increment file sequence
+        self.file_sequence += 1;
+
+        // Create new file path
+        let new_path = self.wal_dir.join(format!("wal_{:06}.log", self.file_sequence));
+
+        // Close current file (it will be dropped)
+        // Open new file
+        let mut new_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&new_path)
+            .await
+            .map_err(|e| Error::internal(format!("Failed to create new WAL file: {}", e)))?;
+
+        // Write header to new file
+        new_file.write_all(WAL_MAGIC).await
+            .map_err(|e| Error::internal(format!("Failed to write WAL magic: {}", e)))?;
+        new_file.write_u32(WAL_VERSION).await
+            .map_err(|e| Error::internal(format!("Failed to write WAL version: {}", e)))?;
+        new_file.flush().await
+            .map_err(|e| Error::internal(format!("Failed to flush WAL: {}", e)))?;
+
+        // Update current file and path
+        self.current_file = new_file;
+        self.current_path = new_path;
+
+        // Cleanup old WAL files (keep only last 5)
+        self.cleanup_old_wal_files().await?;
+
+        Ok(())
+    }
+
+    /// Cleanup old WAL files, keeping only the most recent N files
+    async fn cleanup_old_wal_files(&self) -> Result<()> {
+        const MAX_WAL_FILES: usize = 5;
+
+        // List all WAL files
+        let mut entries = tokio::fs::read_dir(&self.wal_dir).await
+            .map_err(|e| Error::internal(format!("Failed to read WAL directory: {}", e)))?;
+
+        let mut wal_files = Vec::new();
+        while let Some(entry) = entries.next_entry().await
+            .map_err(|e| Error::internal(format!("Failed to read directory entry: {}", e)))? {
+            let path = entry.path();
+            if let Some(name) = path.file_name() {
+                if let Some(name_str) = name.to_str() {
+                    if name_str.starts_with("wal_") && name_str.ends_with(".log") {
+                        wal_files.push(path);
+                    }
+                }
+            }
+        }
+
+        // Sort by file name (which includes sequence number)
+        wal_files.sort();
+
+        // Delete old files if we have more than MAX_WAL_FILES
+        if wal_files.len() > MAX_WAL_FILES {
+            let files_to_delete = &wal_files[..wal_files.len() - MAX_WAL_FILES];
+            for file in files_to_delete {
+                if let Err(e) = tokio::fs::remove_file(file).await {
+                    tracing::warn!("Failed to delete old WAL file {:?}: {}", file, e);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Append an operation to the WAL
     pub async fn append(&mut self, operation: WalOperation) -> Result<u64> {
+        // Check if rotation is needed
+        if self.should_rotate().await? {
+            self.rotate().await?;
+        }
+
         let entry = WalEntry {
             sequence: self.next_sequence,
             timestamp: chrono::Utc::now(),
@@ -161,6 +251,15 @@ impl WalManager {
     /// Read all entries from the WAL
     pub async fn read_all(&self) -> Result<Vec<WalEntry>> {
         Self::read_wal_file(&self.current_path).await
+    }
+
+    /// Replay WAL entries (for crash recovery)
+    ///
+    /// Returns the list of operations that need to be replayed.
+    /// After replaying, caller should call truncate() to clear the WAL.
+    pub async fn replay(&self) -> Result<Vec<WalOperation>> {
+        let entries = self.read_all().await?;
+        Ok(entries.into_iter().map(|e| e.operation).collect())
     }
 
     /// Read last sequence number from WAL file

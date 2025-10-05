@@ -113,17 +113,11 @@ impl Namespace {
 
         // Create/Load WAL
         let wal_dir = format!("wal/{}", name);
-        let wal = WalManager::new(&wal_dir).await?;
+        let mut wal = WalManager::new(&wal_dir).await?;
 
-        // TODO: Replay WAL entries if any exist
-        // This would apply any uncommitted operations
-
-        // TODO: Load existing vectors from segments into index
-        // This would require reading all segments and rebuilding the index
-        // For now, index will be built on first upsert
-
-        Ok(Self {
-            name,
+        // Create the namespace instance first
+        let namespace = Self {
+            name: name.clone(),
             storage,
             cache,
             manifest_manager,
@@ -131,11 +125,78 @@ impl Namespace {
             vector_index: Arc::new(RwLock::new(vector_index)),
             fulltext_indexes: Arc::new(RwLock::new(fulltext_indexes)),
             wal: Arc::new(RwLock::new(wal)),
-        })
+        };
+
+        // Replay WAL entries if any exist (crash recovery)
+        {
+            let wal_guard = namespace.wal.read().await;
+            let operations = wal_guard.replay().await?;
+            drop(wal_guard);
+
+            if !operations.is_empty() {
+                tracing::info!("Replaying {} WAL operations for namespace '{}'", operations.len(), name);
+
+                for op in operations {
+                    match op {
+                        WalOperation::Upsert { documents } => {
+                            namespace.upsert_internal(documents).await?;
+                        }
+                        WalOperation::Delete { .. } => {
+                            // TODO: Handle delete operations (future work)
+                            tracing::warn!("Delete operations not yet supported in WAL replay");
+                        }
+                        WalOperation::Commit { .. } => {
+                            // Commit markers can be ignored during replay
+                        }
+                    }
+                }
+
+                // Truncate WAL after successful replay
+                let mut wal_guard = namespace.wal.write().await;
+                wal_guard.truncate().await?;
+                tracing::info!("WAL replay complete for namespace '{}'", name);
+            }
+        }
+
+        // TODO: Load existing vectors from segments into index
+        // This would require reading all segments and rebuilding the index
+        // For now, index will be built on first upsert
+
+        Ok(namespace)
     }
 
     /// Upsert documents into the namespace
     pub async fn upsert(&self, documents: Vec<Document>) -> Result<usize> {
+        if documents.is_empty() {
+            return Ok(0);
+        }
+
+        // Step 1: Write to WAL first (durability guarantee)
+        let mut wal = self.wal.write().await;
+        let _wal_seq = wal
+            .append(WalOperation::Upsert {
+                documents: documents.clone(),
+            })
+            .await?;
+        wal.sync().await?; // Ensure WAL is flushed to disk
+        drop(wal);
+
+        // Step 2: Perform actual upsert
+        let count = self.upsert_internal(documents).await?;
+
+        // Step 3: Truncate WAL after successful commit
+        // All data is now durable in segments + manifest + indexes
+        let mut wal = self.wal.write().await;
+        wal.truncate().await?;
+
+        Ok(count)
+    }
+
+    /// Internal upsert implementation (without WAL write)
+    ///
+    /// This is used for WAL replay to avoid infinite recursion.
+    /// DO NOT call this directly - use upsert() instead.
+    async fn upsert_internal(&self, documents: Vec<Document>) -> Result<usize> {
         if documents.is_empty() {
             return Ok(0);
         }
@@ -156,16 +217,6 @@ impl Namespace {
                 }
             }
         }
-
-        // Step 1: Write to WAL first (durability guarantee)
-        let mut wal = self.wal.write().await;
-        let _wal_seq = wal
-            .append(WalOperation::Upsert {
-                documents: documents.clone(),
-            })
-            .await?;
-        wal.sync().await?; // Ensure WAL is flushed to disk
-        drop(wal);
 
         // Write segment to storage
         let segment_id = format!("seg_{}", chrono::Utc::now().timestamp_millis());
@@ -229,11 +280,6 @@ impl Namespace {
                 ft_index.add_documents(&texts)?;
             }
         }
-
-        // Step 2: Truncate WAL after successful commit
-        // All data is now durable in segments + manifest + indexes
-        let mut wal = self.wal.write().await;
-        wal.truncate().await?;
 
         Ok(documents.len())
     }
