@@ -21,8 +21,8 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            memory_size: 4 * 1024 * 1024 * 1024,      // 4GB
-            disk_size: 100 * 1024 * 1024 * 1024,      // 100GB
+            memory_size: 4 * 1024 * 1024 * 1024, // 4GB
+            disk_size: 100 * 1024 * 1024 * 1024, // 100GB
             disk_path: "/tmp/elacsym-cache".to_string(),
         }
     }
@@ -48,7 +48,9 @@ impl CacheManager {
 
     /// Get value from cache
     pub async fn get(&self, key: &str) -> Option<Bytes> {
-        self.cache.get(&key.to_string()).map(|entry| entry.value().clone())
+        self.cache
+            .get(&key.to_string())
+            .map(|entry| entry.value().clone())
     }
 
     /// Put value into cache
@@ -86,7 +88,10 @@ impl CacheManager {
         // Note: foyer 0.12 doesn't have built-in prefix removal
         // For now, we'll just document this limitation
         // In production, we'd track keys separately or upgrade to newer foyer
-        tracing::warn!("invalidate_prefix not fully implemented in foyer 0.12: {}", prefix);
+        tracing::warn!(
+            "invalidate_prefix not fully implemented in foyer 0.12: {}",
+            prefix
+        );
     }
 }
 
@@ -117,7 +122,7 @@ mod tests {
     async fn test_cache_basic() {
         let temp_dir = TempDir::new().unwrap();
         let config = CacheConfig {
-            memory_size: 1024 * 1024, // 1MB for test
+            memory_size: 1024 * 1024,    // 1MB for test
             disk_size: 10 * 1024 * 1024, // 10MB for test
             disk_path: temp_dir.path().to_str().unwrap().to_string(),
         };
@@ -169,14 +174,8 @@ mod tests {
 
     #[test]
     fn test_cache_keys() {
-        assert_eq!(
-            CacheManager::manifest_key("my_ns"),
-            "manifest:my_ns"
-        );
-        assert_eq!(
-            CacheManager::vector_index_key("my_ns"),
-            "vidx:my_ns"
-        );
+        assert_eq!(CacheManager::manifest_key("my_ns"), "manifest:my_ns");
+        assert_eq!(CacheManager::vector_index_key("my_ns"), "vidx:my_ns");
         assert_eq!(
             CacheManager::segment_key("my_ns", "seg_001"),
             "seg:my_ns:seg_001"

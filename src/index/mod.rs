@@ -2,8 +2,8 @@
 //!
 //! Handles vector indexes (RaBitQ) and full-text indexes (Tantivy)
 
-pub mod vector;
 pub mod fulltext;
+pub mod vector;
 
-pub use vector::VectorIndex;
 pub use fulltext::FullTextIndex;
+pub use vector::VectorIndex;

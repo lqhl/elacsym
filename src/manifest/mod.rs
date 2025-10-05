@@ -110,7 +110,10 @@ impl ManifestManager {
     pub async fn load(&self, namespace: &str) -> Result<Manifest> {
         let key = Self::manifest_key(namespace);
 
-        let data = self.storage.get(&key).await
+        let data = self
+            .storage
+            .get(&key)
+            .await
             .map_err(|e| Error::NamespaceNotFound(namespace.to_string()))?;
 
         let json = String::from_utf8(data.to_vec())
@@ -149,7 +152,10 @@ impl ManifestManager {
     pub async fn create(&self, namespace: String, schema: Schema) -> Result<Manifest> {
         // Check if already exists
         if self.exists(&namespace).await? {
-            return Err(Error::internal(format!("Namespace {} already exists", namespace)));
+            return Err(Error::internal(format!(
+                "Namespace {} already exists",
+                namespace
+            )));
         }
 
         let manifest = Manifest::new(namespace, schema);
@@ -169,7 +175,7 @@ impl ManifestManager {
 mod tests {
     use super::*;
     use crate::storage::local::LocalStorage;
-    use crate::types::{AttributeSchema, AttributeType, DistanceMetric};
+    use crate::types::DistanceMetric;
     use tempfile::TempDir;
 
     #[test]

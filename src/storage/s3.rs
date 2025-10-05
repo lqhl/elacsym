@@ -18,11 +18,7 @@ pub struct S3Storage {
 }
 
 impl S3Storage {
-    pub async fn new(
-        bucket: String,
-        region: String,
-        endpoint: Option<String>,
-    ) -> Result<Self> {
+    pub async fn new(bucket: String, region: String, endpoint: Option<String>) -> Result<Self> {
         let config = aws_config::defaults(BehaviorVersion::latest())
             .region(Region::new(region))
             .load()

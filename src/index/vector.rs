@@ -40,7 +40,7 @@ impl VectorIndex {
     pub fn new(dimension: usize, metric: DistanceMetric) -> Result<Self> {
         if metric != DistanceMetric::L2 {
             return Err(Error::internal(
-                "RaBitQ currently only supports L2 distance metric"
+                "RaBitQ currently only supports L2 distance metric",
             ));
         }
 
@@ -97,7 +97,8 @@ impl VectorIndex {
         let padded_dim = self.dimension.div_ceil(64) * 64;
 
         // Create temporary directory for RaBitQ files
-        let temp_dir = std::env::temp_dir().join(format!("elacsym_rabitq_{}", uuid::Uuid::new_v4()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("elacsym_rabitq_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir)
             .map_err(|e| Error::internal(format!("Failed to create temp dir: {}", e)))?;
 
@@ -140,7 +141,9 @@ impl VectorIndex {
             self.build_index()?;
         }
 
-        let index = self.index.as_ref()
+        let index = self
+            .index
+            .as_ref()
             .ok_or_else(|| Error::internal("Index not built"))?;
 
         // Pad query vector
@@ -311,11 +314,7 @@ mod tests {
         let mut index = VectorIndex::new(64, DistanceMetric::L2).unwrap();
 
         let ids = vec![1, 2, 3];
-        let vectors = vec![
-            vec![1.0; 64],
-            vec![2.0; 64],
-            vec![3.0; 64],
-        ];
+        let vectors = vec![vec![1.0; 64], vec![2.0; 64], vec![3.0; 64]];
 
         index.add(&ids, &vectors).unwrap();
 

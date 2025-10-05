@@ -51,13 +51,12 @@ impl Namespace {
         let manifest_manager = ManifestManager::new(storage.clone());
 
         // Create manifest
-        let manifest = manifest_manager.create(name.clone(), schema.clone()).await?;
+        let manifest = manifest_manager
+            .create(name.clone(), schema.clone())
+            .await?;
 
         // Create vector index
-        let vector_index = VectorIndex::new(
-            schema.vector_dim,
-            schema.vector_metric,
-        )?;
+        let vector_index = VectorIndex::new(schema.vector_dim, schema.vector_metric)?;
 
         // Create full-text indexes for full_text fields
         let mut fulltext_indexes = HashMap::new();
@@ -96,10 +95,8 @@ impl Namespace {
         let manifest = manifest_manager.load(&name).await?;
 
         // Create vector index
-        let vector_index = VectorIndex::new(
-            manifest.schema.vector_dim,
-            manifest.schema.vector_metric,
-        )?;
+        let vector_index =
+            VectorIndex::new(manifest.schema.vector_dim, manifest.schema.vector_metric)?;
 
         // Create full-text indexes for full_text fields
         let mut fulltext_indexes = HashMap::new();
@@ -133,7 +130,11 @@ impl Namespace {
             drop(wal_guard);
 
             if !operations.is_empty() {
-                tracing::info!("Replaying {} WAL operations for namespace '{}'", operations.len(), name);
+                tracing::info!(
+                    "Replaying {} WAL operations for namespace '{}'",
+                    operations.len(),
+                    name
+                );
 
                 for op in operations {
                     match op {
@@ -359,7 +360,8 @@ impl Namespace {
         };
 
         // Step 4: Merge results (simple union for Phase 1, RRF in Phase 2)
-        let mut combined_results = Self::merge_search_results(vector_results, fulltext_results, top_k);
+        let mut combined_results =
+            Self::merge_search_results(vector_results, fulltext_results, top_k);
 
         // Step 5: Filter search results if we have a filter
         if let Some(ref allowed_ids) = filtered_ids {
@@ -408,9 +410,9 @@ impl Namespace {
                 let storage = self.storage.clone();
                 let path = segment_info.file_path.clone();
 
-                cache.get_or_fetch(&cache_key, || async move {
-                    storage.get(&path).await
-                }).await?
+                cache
+                    .get_or_fetch(&cache_key, || async move { storage.get(&path).await })
+                    .await?
             } else {
                 // No cache - fetch directly
                 self.storage.get(&segment_info.file_path).await?
@@ -494,8 +496,8 @@ impl Namespace {
         fusion::reciprocal_rank_fusion(
             vector_results.as_deref(),
             fulltext_results.as_deref(),
-            0.5, // vector weight
-            0.5, // fulltext weight
+            0.5,  // vector weight
+            0.5,  // fulltext weight
             60.0, // RRF constant k
             top_k,
         )
@@ -542,7 +544,13 @@ impl NamespaceManager {
 
         // Create namespace
         let namespace = Arc::new(
-            Namespace::create(name.clone(), schema, self.storage.clone(), self.cache.clone()).await?
+            Namespace::create(
+                name.clone(),
+                schema,
+                self.storage.clone(),
+                self.cache.clone(),
+            )
+            .await?,
         );
 
         // Store in cache
@@ -564,7 +572,7 @@ impl NamespaceManager {
 
         // Try to load from storage
         let namespace = Arc::new(
-            Namespace::load(name.to_string(), self.storage.clone(), self.cache.clone()).await?
+            Namespace::load(name.to_string(), self.storage.clone(), self.cache.clone()).await?,
         );
 
         // Store in cache
@@ -599,7 +607,9 @@ impl NamespaceManager {
 mod tests {
     use super::*;
     use crate::storage::local::LocalStorage;
-    use crate::types::{AttributeSchema, AttributeType, AttributeValue, DistanceMetric, FullTextConfig};
+    use crate::types::{
+        AttributeSchema, AttributeType, AttributeValue, DistanceMetric, FullTextConfig,
+    };
     use std::collections::HashMap;
     use tempfile::TempDir;
 
@@ -854,7 +864,10 @@ mod tests {
         };
 
         let query = vec![2.0; 64];
-        let results = ns.query(Some(&query), None, 10, Some(&filter)).await.unwrap();
+        let results = ns
+            .query(Some(&query), None, 10, Some(&filter))
+            .await
+            .unwrap();
 
         // Should only return doc 1 and 3 (both tech with score >= 4.0)
         assert_eq!(results.len(), 2);

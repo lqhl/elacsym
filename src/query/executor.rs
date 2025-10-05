@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use crate::query::{FilterCondition, FilterExpression, FilterOp};
 use crate::segment::{SegmentReader, SegmentWriter};
 use crate::storage::StorageBackend;
-use crate::types::{AttributeValue, SegmentInfo, Schema};
+use crate::types::{AttributeValue, Schema, SegmentInfo};
 use crate::{Error, Result};
 
 /// Filter executor for applying attribute filters on segments
@@ -181,9 +181,7 @@ impl FilterExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AttributeSchema, AttributeType, DistanceMetric, Document};
-    use crate::storage::local::LocalStorage;
-    use tempfile::TempDir;
+
     use std::collections::HashMap;
 
     #[test]

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::types::{Document, DocId};
+use crate::types::{DocId, Document};
 use crate::{Error, Result};
 
 /// WAL operation types
@@ -120,7 +120,10 @@ impl WalManager {
 
     /// Check if WAL file should be rotated
     async fn should_rotate(&self) -> Result<bool> {
-        let metadata = self.current_file.metadata().await
+        let metadata = self
+            .current_file
+            .metadata()
+            .await
             .map_err(|e| Error::internal(format!("Failed to get file metadata: {}", e)))?;
         Ok(metadata.len() >= self.max_file_size)
     }
@@ -131,7 +134,9 @@ impl WalManager {
         self.file_sequence += 1;
 
         // Create new file path
-        let new_path = self.wal_dir.join(format!("wal_{:06}.log", self.file_sequence));
+        let new_path = self
+            .wal_dir
+            .join(format!("wal_{:06}.log", self.file_sequence));
 
         // Close current file (it will be dropped)
         // Open new file
@@ -143,11 +148,17 @@ impl WalManager {
             .map_err(|e| Error::internal(format!("Failed to create new WAL file: {}", e)))?;
 
         // Write header to new file
-        new_file.write_all(WAL_MAGIC).await
+        new_file
+            .write_all(WAL_MAGIC)
+            .await
             .map_err(|e| Error::internal(format!("Failed to write WAL magic: {}", e)))?;
-        new_file.write_u32(WAL_VERSION).await
+        new_file
+            .write_u32(WAL_VERSION)
+            .await
             .map_err(|e| Error::internal(format!("Failed to write WAL version: {}", e)))?;
-        new_file.flush().await
+        new_file
+            .flush()
+            .await
             .map_err(|e| Error::internal(format!("Failed to flush WAL: {}", e)))?;
 
         // Update current file and path
@@ -165,12 +176,16 @@ impl WalManager {
         const MAX_WAL_FILES: usize = 5;
 
         // List all WAL files
-        let mut entries = tokio::fs::read_dir(&self.wal_dir).await
+        let mut entries = tokio::fs::read_dir(&self.wal_dir)
+            .await
             .map_err(|e| Error::internal(format!("Failed to read WAL directory: {}", e)))?;
 
         let mut wal_files = Vec::new();
-        while let Some(entry) = entries.next_entry().await
-            .map_err(|e| Error::internal(format!("Failed to read directory entry: {}", e)))? {
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| Error::internal(format!("Failed to read directory entry: {}", e)))?
+        {
             let path = entry.path();
             if let Some(name) = path.file_name() {
                 if let Some(name_str) = name.to_str() {
@@ -319,7 +334,11 @@ impl WalManager {
 
             // Sanity check: reject unreasonably large entries (>100MB)
             if length > 100 * 1024 * 1024 {
-                tracing::warn!("WAL entry {} has unreasonable length: {} bytes. Stopping recovery.", entry_index, length);
+                tracing::warn!(
+                    "WAL entry {} has unreasonable length: {} bytes. Stopping recovery.",
+                    entry_index,
+                    length
+                );
                 break;
             }
 
@@ -328,9 +347,17 @@ impl WalManager {
             if let Err(e) = file.read_exact(&mut data).await {
                 if e.kind() == std::io::ErrorKind::UnexpectedEof {
                     // Truncated entry - log and stop
-                    tracing::warn!("WAL entry {} truncated (expected {} bytes). Stopping recovery.", entry_index, length);
+                    tracing::warn!(
+                        "WAL entry {} truncated (expected {} bytes). Stopping recovery.",
+                        entry_index,
+                        length
+                    );
                 } else {
-                    tracing::warn!("WAL entry {} corrupted (failed to read data): {}. Stopping recovery.", entry_index, e);
+                    tracing::warn!(
+                        "WAL entry {} corrupted (failed to read data): {}. Stopping recovery.",
+                        entry_index,
+                        e
+                    );
                 }
                 break;
             }
@@ -344,7 +371,11 @@ impl WalManager {
                     break;
                 }
                 Err(e) => {
-                    tracing::warn!("WAL entry {} corrupted (failed to read CRC): {}. Stopping recovery.", entry_index, e);
+                    tracing::warn!(
+                        "WAL entry {} corrupted (failed to read CRC): {}. Stopping recovery.",
+                        entry_index,
+                        e
+                    );
                     break;
                 }
             };
@@ -359,7 +390,9 @@ impl WalManager {
                 // CRC mismatch - log and skip this entry
                 tracing::warn!(
                     "WAL entry {} CRC mismatch (expected: {}, got: {}). Skipping corrupted entry.",
-                    entry_index, stored_crc, calculated_crc
+                    entry_index,
+                    stored_crc,
+                    calculated_crc
                 );
                 entry_index += 1;
                 continue;
@@ -370,7 +403,11 @@ impl WalManager {
                 Ok(e) => e,
                 Err(e) => {
                     // Deserialization failed - log and skip
-                    tracing::warn!("WAL entry {} failed to deserialize: {}. Skipping.", entry_index, e);
+                    tracing::warn!(
+                        "WAL entry {} failed to deserialize: {}. Skipping.",
+                        entry_index,
+                        e
+                    );
                     entry_index += 1;
                     continue;
                 }
@@ -381,11 +418,16 @@ impl WalManager {
         }
 
         if entry_index > 0 && entries.is_empty() {
-            tracing::warn!("All {} WAL entries were corrupted. No operations recovered.", entry_index);
+            tracing::warn!(
+                "All {} WAL entries were corrupted. No operations recovered.",
+                entry_index
+            );
         } else if entry_index > entries.len() {
             tracing::warn!(
                 "Recovered {}/{} WAL entries. {} entries were corrupted or truncated.",
-                entries.len(), entry_index, entry_index - entries.len()
+                entries.len(),
+                entry_index,
+                entry_index - entries.len()
             );
         }
 

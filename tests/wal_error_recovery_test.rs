@@ -1,5 +1,5 @@
-use elacsym::wal::{WalManager, WalOperation};
 use elacsym::types::Document;
+use elacsym::wal::{WalManager, WalOperation};
 use std::collections::HashMap;
 use tempfile::TempDir;
 use tokio::fs::OpenOptions;

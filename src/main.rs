@@ -20,8 +20,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Get storage path from environment or use default
-    let storage_path = env::var("ELACSYM_STORAGE_PATH")
-        .unwrap_or_else(|_| "./data".to_string());
+    let storage_path = env::var("ELACSYM_STORAGE_PATH").unwrap_or_else(|_| "./data".to_string());
 
     tracing::info!("Using storage path: {}", storage_path);
 

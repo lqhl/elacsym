@@ -2,11 +2,11 @@
 //!
 //! Provides BM25-based full-text search for string attributes.
 
+use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy};
-use std::path::Path;
 
 use crate::types::DocId;
 use crate::{Error, Result};

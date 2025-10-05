@@ -36,7 +36,10 @@ async fn test_wal_recovery_after_crash() {
             vector: Some(vec![0.1, 0.2, 0.3]),
             attributes: {
                 let mut map = HashMap::new();
-                map.insert("title".to_string(), AttributeValue::String("Doc 1".to_string()));
+                map.insert(
+                    "title".to_string(),
+                    AttributeValue::String("Doc 1".to_string()),
+                );
                 map
             },
         },
@@ -45,7 +48,10 @@ async fn test_wal_recovery_after_crash() {
             vector: Some(vec![0.4, 0.5, 0.6]),
             attributes: {
                 let mut map = HashMap::new();
-                map.insert("title".to_string(), AttributeValue::String("Doc 2".to_string()));
+                map.insert(
+                    "title".to_string(),
+                    AttributeValue::String("Doc 2".to_string()),
+                );
                 map
             },
         },
@@ -110,14 +116,8 @@ async fn test_wal_recovery_after_crash() {
     let found_doc1 = results.iter().any(|(doc, _)| doc.id == 1);
     let found_doc2 = results.iter().any(|(doc, _)| doc.id == 2);
 
-    assert!(
-        found_doc1,
-        "Document 1 should be recovered from WAL"
-    );
-    assert!(
-        found_doc2,
-        "Document 2 should be recovered from WAL"
-    );
+    assert!(found_doc1, "Document 1 should be recovered from WAL");
+    assert!(found_doc2, "Document 2 should be recovered from WAL");
 }
 
 #[tokio::test]
@@ -135,14 +135,9 @@ async fn test_wal_empty_after_successful_upsert() {
 
     // Create namespace
     let storage = Arc::new(LocalStorage::new(storage_path.clone()).unwrap());
-    let namespace = Namespace::create(
-        "test_wal_truncate".to_string(),
-        schema,
-        storage,
-        None,
-    )
-    .await
-    .unwrap();
+    let namespace = Namespace::create("test_wal_truncate".to_string(), schema, storage, None)
+        .await
+        .unwrap();
 
     // Upsert documents (should write WAL and then truncate)
     let documents = vec![Document {

@@ -193,13 +193,8 @@ mod tests {
         let vector_results = vec![(1, 0.9), (2, 0.8)];
         let fulltext_results = vec![(2, 10.0), (3, 8.0)];
 
-        let merged = weighted_score_fusion(
-            Some(&vector_results),
-            Some(&fulltext_results),
-            0.5,
-            0.5,
-            10,
-        );
+        let merged =
+            weighted_score_fusion(Some(&vector_results), Some(&fulltext_results), 0.5, 0.5, 10);
 
         // Doc 2 appears in both
         assert!(merged.len() >= 2);

@@ -119,7 +119,9 @@ impl FullTextConfig {
     pub fn remove_stopwords(&self) -> bool {
         match self {
             FullTextConfig::Simple(_) => true,
-            FullTextConfig::Advanced { remove_stopwords, .. } => *remove_stopwords,
+            FullTextConfig::Advanced {
+                remove_stopwords, ..
+            } => *remove_stopwords,
         }
     }
 

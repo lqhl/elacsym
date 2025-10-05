@@ -84,9 +84,7 @@ impl FullTextQuery {
                     0.0
                 }
             }
-            FullTextQuery::Multi { weights, .. } => {
-                weights.get(field_name).copied().unwrap_or(1.0)
-            }
+            FullTextQuery::Multi { weights, .. } => weights.get(field_name).copied().unwrap_or(1.0),
         }
     }
 }

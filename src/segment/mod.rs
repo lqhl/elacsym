@@ -3,10 +3,9 @@
 //! Segments store document data in columnar Parquet format
 
 use arrow::array::{
-    Array, ArrayRef, BooleanArray, BooleanBuilder, FixedSizeListArray,
-    Float32Builder, Float64Array, Float64Builder, GenericListArray,
-    Int64Array, Int64Builder, RecordBatch, StringArray, StringBuilder,
-    UInt64Array, UInt64Builder,
+    Array, ArrayRef, BooleanArray, BooleanBuilder, FixedSizeListArray, Float32Builder,
+    Float64Array, Float64Builder, GenericListArray, Int64Array, Int64Builder, RecordBatch,
+    StringArray, StringBuilder, UInt64Array, UInt64Builder,
 };
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use bytes::Bytes;
@@ -72,8 +71,7 @@ impl SegmentWriter {
             .set_compression(parquet::basic::Compression::SNAPPY)
             .build();
 
-        let mut writer =
-            ArrowWriter::try_new(&mut buffer, self.arrow_schema.clone(), Some(props))?;
+        let mut writer = ArrowWriter::try_new(&mut buffer, self.arrow_schema.clone(), Some(props))?;
 
         writer.write(&batch)?;
         writer.close()?;
@@ -178,7 +176,9 @@ impl SegmentWriter {
                 AttributeType::StringArray => {
                     let mut builder = arrow::array::ListBuilder::new(StringBuilder::new());
                     for doc in documents {
-                        if let Some(AttributeValue::StringArray(arr)) = doc.attributes.get(attr_name) {
+                        if let Some(AttributeValue::StringArray(arr)) =
+                            doc.attributes.get(attr_name)
+                        {
                             for s in arr {
                                 builder.values().append_value(s);
                             }
@@ -227,7 +227,8 @@ impl SegmentReader {
         let builder = ParquetRecordBatchReaderBuilder::try_new(data)
             .map_err(|e| Error::internal(format!("Failed to create Parquet reader: {}", e)))?;
 
-        let reader = builder.build()
+        let reader = builder
+            .build()
             .map_err(|e| Error::internal(format!("Failed to build Parquet reader: {}", e)))?;
 
         let mut documents = Vec::new();
@@ -424,22 +425,16 @@ mod tests {
         assert_eq!(read_docs[0].id, 1);
         assert_eq!(read_docs[0].vector, Some(vec![0.1, 0.2, 0.3]));
 
-        let title = read_docs[0]
-            .attributes
-            .get("title")
-            .and_then(|v| match v {
-                AttributeValue::String(s) => Some(s.as_str()),
-                _ => None,
-            });
+        let title = read_docs[0].attributes.get("title").and_then(|v| match v {
+            AttributeValue::String(s) => Some(s.as_str()),
+            _ => None,
+        });
         assert_eq!(title, Some("Test Doc"));
 
-        let score = read_docs[0]
-            .attributes
-            .get("score")
-            .and_then(|v| match v {
-                AttributeValue::Float(f) => Some(*f),
-                _ => None,
-            });
+        let score = read_docs[0].attributes.get("score").and_then(|v| match v {
+            AttributeValue::Float(f) => Some(*f),
+            _ => None,
+        });
         assert_eq!(score, Some(4.5));
     }
 }

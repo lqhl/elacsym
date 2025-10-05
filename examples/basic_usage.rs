@@ -2,7 +2,9 @@
 
 use elacsym::namespace::Namespace;
 use elacsym::storage::local::LocalStorage;
-use elacsym::types::{AttributeSchema, AttributeType, AttributeValue, DistanceMetric, Document, Schema};
+use elacsym::types::{
+    AttributeSchema, AttributeType, AttributeValue, DistanceMetric, Document, Schema,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -50,11 +52,7 @@ async fn main() -> elacsym::Result<()> {
 
     // 3. Create namespace
     println!("Creating namespace 'my_docs'...");
-    let namespace = Namespace::create(
-        "my_docs".to_string(),
-        schema,
-        storage.clone(),
-    ).await?;
+    let namespace = Namespace::create("my_docs".to_string(), schema, storage.clone()).await?;
     println!("✓ Namespace created\n");
 
     // 4. Insert documents
@@ -65,8 +63,14 @@ async fn main() -> elacsym::Result<()> {
             vector: Some(vec![1.0; 128]),
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("title".to_string(), AttributeValue::String("Rust Programming".to_string()));
-                attrs.insert("category".to_string(), AttributeValue::String("tech".to_string()));
+                attrs.insert(
+                    "title".to_string(),
+                    AttributeValue::String("Rust Programming".to_string()),
+                );
+                attrs.insert(
+                    "category".to_string(),
+                    AttributeValue::String("tech".to_string()),
+                );
                 attrs.insert("score".to_string(), AttributeValue::Float(4.8));
                 attrs
             },
@@ -76,8 +80,14 @@ async fn main() -> elacsym::Result<()> {
             vector: Some(vec![2.0; 128]),
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("title".to_string(), AttributeValue::String("Vector Database Guide".to_string()));
-                attrs.insert("category".to_string(), AttributeValue::String("tech".to_string()));
+                attrs.insert(
+                    "title".to_string(),
+                    AttributeValue::String("Vector Database Guide".to_string()),
+                );
+                attrs.insert(
+                    "category".to_string(),
+                    AttributeValue::String("tech".to_string()),
+                );
                 attrs.insert("score".to_string(), AttributeValue::Float(4.5));
                 attrs
             },
@@ -87,8 +97,14 @@ async fn main() -> elacsym::Result<()> {
             vector: Some(vec![3.0; 128]),
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("title".to_string(), AttributeValue::String("Machine Learning Basics".to_string()));
-                attrs.insert("category".to_string(), AttributeValue::String("ai".to_string()));
+                attrs.insert(
+                    "title".to_string(),
+                    AttributeValue::String("Machine Learning Basics".to_string()),
+                );
+                attrs.insert(
+                    "category".to_string(),
+                    AttributeValue::String("ai".to_string()),
+                );
                 attrs.insert("score".to_string(), AttributeValue::Float(4.7));
                 attrs
             },
@@ -98,8 +114,14 @@ async fn main() -> elacsym::Result<()> {
             vector: Some(vec![1.5; 128]),
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("title".to_string(), AttributeValue::String("Rust for Beginners".to_string()));
-                attrs.insert("category".to_string(), AttributeValue::String("tech".to_string()));
+                attrs.insert(
+                    "title".to_string(),
+                    AttributeValue::String("Rust for Beginners".to_string()),
+                );
+                attrs.insert(
+                    "category".to_string(),
+                    AttributeValue::String("tech".to_string()),
+                );
                 attrs.insert("score".to_string(), AttributeValue::Float(4.6));
                 attrs
             },
@@ -123,7 +145,12 @@ async fn main() -> elacsym::Result<()> {
 
     println!("Top 3 results:");
     for (i, (doc_id, distance)) in results.iter().enumerate() {
-        println!("  {}. Document ID: {}, Distance: {:.4}", i + 1, doc_id, distance);
+        println!(
+            "  {}. Document ID: {}, Distance: {:.4}",
+            i + 1,
+            doc_id,
+            distance
+        );
     }
     println!();
 
@@ -134,7 +161,12 @@ async fn main() -> elacsym::Result<()> {
 
     println!("Top 2 results:");
     for (i, (doc_id, distance)) in results2.iter().enumerate() {
-        println!("  {}. Document ID: {}, Distance: {:.4}", i + 1, doc_id, distance);
+        println!(
+            "  {}. Document ID: {}, Distance: {:.4}",
+            i + 1,
+            doc_id,
+            distance
+        );
     }
 
     println!("\n✓ Example completed successfully!");
