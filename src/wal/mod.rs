@@ -2,12 +2,20 @@
 //!
 //! Provides crash-safe writes by logging operations before they're committed.
 //! Inspired by Turbopuffer's WAL design.
+//!
+//! Two implementations:
+//! - `WalManager`: Local filesystem WAL (single-node mode)
+//! - `S3WalManager`: S3-backed WAL (distributed mode)
+
+pub mod s3;
 
 use bytes::{BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+pub use s3::S3WalManager;
 
 use crate::types::{DocId, Document};
 use crate::{Error, Result};
