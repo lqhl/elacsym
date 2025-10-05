@@ -7,7 +7,7 @@ use bytes::{BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use crate::types::{DocId, Document};
 use crate::{Error, Result};
@@ -436,50 +436,26 @@ impl WalManager {
 
     /// Truncate the WAL (after successful persistence)
     pub async fn truncate(&mut self) -> Result<()> {
-        // Close current file
-        drop(std::mem::replace(
-            &mut self.current_file,
-            // Temporary placeholder
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/dev/null")
-                .await
-                .map_err(|e| Error::internal(format!("Failed to open /dev/null: {}", e)))?,
-        ));
-
-        // Remove old file (ignore if it doesn't exist)
-        if let Err(e) = tokio::fs::remove_file(&self.current_path).await {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(Error::internal(format!("Failed to remove WAL file: {}", e)));
-            }
-            // If file doesn't exist, that's fine - it means it was already cleaned up
-        }
-
-        // Create new file
+        // Reset sequence counter
         self.next_sequence = 0;
-        let mut new_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.current_path)
-            .await
-            .map_err(|e| Error::internal(format!("Failed to create new WAL file: {}", e)))?;
 
-        // Write header
-        new_file
-            .write_all(WAL_MAGIC)
+        // Truncate the file to header-only size
+        self.current_file
+            .set_len(WAL_MAGIC.len() as u64 + 4) // Magic + version
             .await
-            .map_err(|e| Error::internal(format!("Failed to write WAL magic: {}", e)))?;
-        new_file
-            .write_u32(WAL_VERSION)
-            .await
-            .map_err(|e| Error::internal(format!("Failed to write WAL version: {}", e)))?;
-        new_file
-            .flush()
-            .await
-            .map_err(|e| Error::internal(format!("Failed to flush WAL: {}", e)))?;
+            .map_err(|e| Error::internal(format!("Failed to truncate WAL file: {}", e)))?;
 
-        self.current_file = new_file;
+        // Seek to end of header to prepare for new entries
+        self.current_file
+            .seek(std::io::SeekFrom::Start(WAL_MAGIC.len() as u64 + 4))
+            .await
+            .map_err(|e| Error::internal(format!("Failed to seek in WAL file: {}", e)))?;
+
+        // Sync to ensure truncation is persisted
+        self.current_file
+            .sync_all()
+            .await
+            .map_err(|e| Error::internal(format!("Failed to sync WAL file: {}", e)))?;
 
         Ok(())
     }
