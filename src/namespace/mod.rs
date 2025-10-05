@@ -18,7 +18,7 @@ use crate::manifest::{Manifest, ManifestManager};
 use crate::query::{fusion, FilterExecutor, FilterExpression, FullTextQuery};
 use crate::segment::{SegmentReader, SegmentWriter};
 use crate::storage::StorageBackend;
-use crate::types::{AttributeValue, Document, FullTextConfig, Schema, SegmentInfo};
+use crate::types::{AttributeValue, DocId, Document, FullTextConfig, Schema, SegmentInfo, Vector};
 use crate::wal::{WalManager, WalOperation};
 use crate::{Error, Result};
 
@@ -168,11 +168,82 @@ impl Namespace {
             }
         }
 
-        // TODO: Load existing vectors from segments into index
-        // This would require reading all segments and rebuilding the index
-        // For now, index will be built on first upsert
+        // Load existing vectors from segments into indexes
+        tracing::info!("Rebuilding indexes for namespace '{}'", name);
+        namespace.rebuild_indexes().await?;
 
         Ok(namespace)
+    }
+
+    /// Rebuild vector and full-text indexes from all segments
+    ///
+    /// This is called when loading a namespace from storage to restore indexes.
+    async fn rebuild_indexes(&self) -> Result<()> {
+        let manifest = self.manifest.read().await;
+        let segments = manifest.segments.clone();
+        let schema = manifest.schema.clone();
+        drop(manifest);
+
+        if segments.is_empty() {
+            tracing::info!("No segments to rebuild indexes from");
+            return Ok(());
+        }
+
+        tracing::info!("Rebuilding indexes from {} segments", segments.len());
+
+        // Collect all vectors and texts from all segments
+        let mut all_vectors: Vec<(DocId, Vector)> = Vec::new();
+        let mut all_texts: HashMap<String, Vec<(DocId, String)>> = HashMap::new();
+
+        for segment_info in &segments {
+            // Read segment data
+            let segment_data = self.storage.get(&segment_info.file_path).await?;
+
+            // Parse segment
+            let writer = SegmentWriter::new(schema.clone())?;
+            let reader = SegmentReader::new(writer.arrow_schema);
+            let documents = reader.read_parquet(segment_data)?;
+
+            // Extract vectors
+            for doc in &documents {
+                if let Some(ref vector) = doc.vector {
+                    all_vectors.push((doc.id, vector.clone()));
+                }
+
+                // Extract text fields
+                for (field_name, value) in &doc.attributes {
+                    if let AttributeValue::String(text) = value {
+                        all_texts
+                            .entry(field_name.clone())
+                            .or_insert_with(Vec::new)
+                            .push((doc.id, text.clone()));
+                    }
+                }
+            }
+        }
+
+        // Rebuild vector index
+        if !all_vectors.is_empty() {
+            let mut vector_index = self.vector_index.write().await;
+            let (ids, vectors): (Vec<_>, Vec<_>) = all_vectors.into_iter().unzip();
+            vector_index.add(&ids, &vectors)?;
+            tracing::info!("Rebuilt vector index with {} vectors", ids.len());
+        }
+
+        // Rebuild full-text indexes
+        let mut ft_indexes = self.fulltext_indexes.write().await;
+        for (field_name, index) in ft_indexes.iter_mut() {
+            if let Some(texts) = all_texts.get(field_name) {
+                index.add_documents(texts)?;
+                tracing::info!(
+                    "Rebuilt full-text index for '{}' with {} docs",
+                    field_name,
+                    texts.len()
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// Upsert documents into the namespace
@@ -268,7 +339,13 @@ impl Namespace {
 
         if !vectors_to_add.is_empty() {
             let (ids, vectors): (Vec<_>, Vec<_>) = vectors_to_add.into_iter().unzip();
+            tracing::debug!(
+                "Adding {} vectors to index, current count: {}",
+                ids.len(),
+                index.vector_count()
+            );
             index.add(&ids, &vectors)?;
+            tracing::debug!("After add, vector count: {}", index.vector_count());
         }
         drop(index); // Release vector index lock
 
@@ -321,7 +398,18 @@ impl Namespace {
         let vector_results = if let Some(vector) = query_vector {
             let mut index = self.vector_index.write().await;
             let query_vec = vector.to_vec();
+
+            tracing::debug!(
+                "Vector search: dimension={}, top_k={}, vector_count={}",
+                query_vec.len(),
+                top_k,
+                index.vector_count()
+            );
+
             let results = index.search(&query_vec, top_k * 2)?; // Over-sample for merging
+
+            tracing::debug!("Vector search returned {} results", results.len());
+
             drop(index);
             Some(results)
         } else {

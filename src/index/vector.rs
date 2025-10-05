@@ -126,6 +126,11 @@ impl VectorIndex {
         Ok(())
     }
 
+    /// Get the number of vectors in the index
+    pub fn vector_count(&self) -> usize {
+        self.vectors.len()
+    }
+
     /// Search for nearest neighbors
     pub fn search(&mut self, query: &Vector, top_k: usize) -> Result<Vec<(DocId, f32)>> {
         if query.len() != self.dimension {

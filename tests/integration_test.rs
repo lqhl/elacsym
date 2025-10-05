@@ -220,8 +220,10 @@ async fn test_wal_recovery() {
         let stats = namespace.stats().await;
         assert_eq!(stats.total_docs, 2);
 
-        // Note: Vector search after reload requires index rebuild (not yet implemented)
-        // For now we just verify the namespace and data are persisted
+        // Query should work now (indexes rebuilt on load)
+        let query = vec![1.5; 64];
+        let results = namespace.query(Some(&query), None, 10, None).await.unwrap();
+        assert_eq!(results.len(), 2);
     }
 }
 
@@ -396,8 +398,11 @@ async fn test_namespace_persistence() {
         let stats = namespace.stats().await;
         assert_eq!(stats.total_docs, 1);
 
-        // Note: Vector search after reload requires index rebuild (not yet implemented)
-        // For now we verify namespace schema and persistence
+        // Query should work now (indexes rebuilt on load)
+        let query = vec![1.0; 64];
+        let results = namespace.query(Some(&query), None, 10, None).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.id, 1);
     }
 }
 
