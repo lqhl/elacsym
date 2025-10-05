@@ -1,8 +1,11 @@
 //! Vector index using RaBitQ
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use crate::storage::StorageBackend;
 use crate::types::{DistanceMetric, DocId, Vector};
 use crate::{Error, Result};
 
@@ -190,6 +193,65 @@ impl VectorIndex {
 
         // Mark for rebuild since we don't serialize the RaBitQ index
         index.needs_rebuild = true;
+
+        Ok(index)
+    }
+
+    /// Build and persist segment-level index to storage
+    ///
+    /// This is the key method for per-segment indexing:
+    /// 1. Builds RaBitQ index from vectors in this segment
+    /// 2. Serializes index metadata (vectors, mappings, centroids)
+    /// 3. Uploads to storage at {namespace}/segments/{segment_id}.rabitq
+    pub async fn build_and_persist(
+        &mut self,
+        storage: Arc<dyn StorageBackend>,
+        segment_id: &str,
+        namespace: &str,
+    ) -> Result<String> {
+        if self.vectors.is_empty() {
+            return Err(Error::internal("Cannot persist empty index"));
+        }
+
+        // 1. Build RaBitQ index (ensures index is up-to-date)
+        self.build_index()?;
+
+        // 2. Serialize to JSON (includes vectors, id_map, reverse_map)
+        // Note: RaBitQ index itself is not serialized, will be rebuilt on load
+        let index_bytes = self.to_bytes()?;
+
+        // 3. Generate storage path
+        let index_path = format!("{}/segments/{}.rabitq", namespace, segment_id);
+
+        // 4. Upload to storage
+        tracing::info!(
+            "Persisting vector index to {} ({} vectors, {} bytes)",
+            index_path,
+            self.vectors.len(),
+            index_bytes.len()
+        );
+        storage
+            .put(&index_path, Bytes::from(index_bytes))
+            .await?;
+
+        Ok(index_path)
+    }
+
+    /// Load segment index from storage
+    ///
+    /// Downloads and deserializes a per-segment vector index.
+    /// The RaBitQ index will be rebuilt on first search.
+    pub async fn load_from_storage(
+        storage: Arc<dyn StorageBackend>,
+        index_path: &str,
+    ) -> Result<Self> {
+        tracing::info!("Loading vector index from {}", index_path);
+
+        let data = storage.get(index_path).await?;
+        let mut index = Self::from_bytes(&data)?;
+
+        // Rebuild RaBitQ index immediately to avoid search-time overhead
+        index.build_index()?;
 
         Ok(index)
     }

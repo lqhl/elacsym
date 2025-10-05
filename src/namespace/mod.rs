@@ -177,7 +177,9 @@ impl Namespace {
 
     /// Rebuild vector and full-text indexes from all segments
     ///
-    /// This is called when loading a namespace from storage to restore indexes.
+    /// NEW APPROACH (per-segment indexes):
+    /// - If segment has index_path, load from storage (fast)
+    /// - Otherwise, rebuild from segment data (legacy/fallback)
     async fn rebuild_indexes(&self) -> Result<()> {
         let manifest = self.manifest.read().await;
         let segments = manifest.segments.clone();
@@ -189,57 +191,161 @@ impl Namespace {
             return Ok(());
         }
 
-        tracing::info!("Rebuilding indexes from {} segments", segments.len());
+        tracing::info!(
+            "Rebuilding indexes from {} segments (per-segment mode)",
+            segments.len()
+        );
 
-        // Collect all vectors and texts from all segments
+        // Strategy: Load per-segment indexes and merge into global in-memory indexes
+        // This is a transitional approach - eventually we'll query per-segment indexes directly
+
         let mut all_vectors: Vec<(DocId, Vector)> = Vec::new();
         let mut all_texts: HashMap<String, Vec<(DocId, String)>> = HashMap::new();
 
         for segment_info in &segments {
-            // Read segment data
-            let segment_data = self.storage.get(&segment_info.file_path).await?;
+            // Try to load vector index from storage
+            if let Some(ref vector_index_path) = segment_info.vector_index_path {
+                match VectorIndex::load_from_storage(self.storage.clone(), vector_index_path).await
+                {
+                    Ok(segment_index) => {
+                        // Extract vectors from loaded index
+                        tracing::info!(
+                            "Loaded vector index from {} ({} vectors)",
+                            vector_index_path,
+                            segment_index.len()
+                        );
 
-            // Parse segment
-            let writer = SegmentWriter::new(schema.clone())?;
-            let reader = SegmentReader::new(writer.arrow_schema);
-            let documents = reader.read_parquet(segment_data)?;
-
-            // Extract vectors
-            for doc in &documents {
-                if let Some(ref vector) = doc.vector {
-                    all_vectors.push((doc.id, vector.clone()));
+                        // Merge vectors into global list
+                        for (doc_id, vector) in segment_index
+                            .reverse_map
+                            .iter()
+                            .zip(segment_index.vectors.iter())
+                        {
+                            all_vectors.push((*doc_id, vector.clone()));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to load vector index from {}: {}. Falling back to segment rebuild",
+                            vector_index_path, e
+                        );
+                        // Fallback: rebuild from segment data
+                        self.rebuild_vector_from_segment(segment_info, &schema, &mut all_vectors)
+                            .await?;
+                    }
                 }
+            } else {
+                // Legacy segment without index - rebuild from data
+                self.rebuild_vector_from_segment(segment_info, &schema, &mut all_vectors)
+                    .await?;
+            }
 
-                // Extract text fields
-                for (field_name, value) in &doc.attributes {
-                    if let AttributeValue::String(text) = value {
-                        all_texts
-                            .entry(field_name.clone())
-                            .or_insert_with(Vec::new)
-                            .push((doc.id, text.clone()));
+            // Try to load full-text indexes from storage
+            for (field_name, index_path) in &segment_info.fulltext_index_paths {
+                match FullTextIndex::load_from_storage(
+                    self.storage.clone(),
+                    index_path,
+                    field_name.clone(),
+                )
+                .await
+                {
+                    Ok(segment_ft_index) => {
+                        tracing::info!(
+                            "Loaded full-text index for '{}' from {} ({} docs)",
+                            field_name,
+                            index_path,
+                            segment_ft_index.num_docs()
+                        );
+
+                        // Note: We can't easily extract texts from Tantivy index
+                        // So we still need to read segment data for full-text
+                        // This is a limitation - in future we should query per-segment indexes directly
+                        self.rebuild_fulltext_from_segment(segment_info, &schema, &mut all_texts)
+                            .await?;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to load full-text index from {}: {}. Falling back to segment rebuild",
+                            index_path, e
+                        );
+                        self.rebuild_fulltext_from_segment(segment_info, &schema, &mut all_texts)
+                            .await?;
                     }
                 }
             }
+
+            // If no full-text index paths, rebuild from segment data
+            if segment_info.fulltext_index_paths.is_empty() {
+                self.rebuild_fulltext_from_segment(segment_info, &schema, &mut all_texts)
+                    .await?;
+            }
         }
 
-        // Rebuild vector index
+        // Rebuild global vector index
         if !all_vectors.is_empty() {
             let mut vector_index = self.vector_index.write().await;
             let (ids, vectors): (Vec<_>, Vec<_>) = all_vectors.into_iter().unzip();
             vector_index.add(&ids, &vectors)?;
-            tracing::info!("Rebuilt vector index with {} vectors", ids.len());
+            tracing::info!("Rebuilt global vector index with {} vectors", ids.len());
         }
 
-        // Rebuild full-text indexes
+        // Rebuild global full-text indexes
         let mut ft_indexes = self.fulltext_indexes.write().await;
         for (field_name, index) in ft_indexes.iter_mut() {
             if let Some(texts) = all_texts.get(field_name) {
                 index.add_documents(texts)?;
                 tracing::info!(
-                    "Rebuilt full-text index for '{}' with {} docs",
+                    "Rebuilt global full-text index for '{}' with {} docs",
                     field_name,
                     texts.len()
                 );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Helper: rebuild vector index from segment data
+    async fn rebuild_vector_from_segment(
+        &self,
+        segment_info: &SegmentInfo,
+        schema: &Schema,
+        all_vectors: &mut Vec<(DocId, Vector)>,
+    ) -> Result<()> {
+        let segment_data = self.storage.get(&segment_info.file_path).await?;
+        let writer = SegmentWriter::new(schema.clone())?;
+        let reader = SegmentReader::new(writer.arrow_schema);
+        let documents = reader.read_parquet(segment_data)?;
+
+        for doc in &documents {
+            if let Some(ref vector) = doc.vector {
+                all_vectors.push((doc.id, vector.clone()));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Helper: rebuild full-text indexes from segment data
+    async fn rebuild_fulltext_from_segment(
+        &self,
+        segment_info: &SegmentInfo,
+        schema: &Schema,
+        all_texts: &mut HashMap<String, Vec<(DocId, String)>>,
+    ) -> Result<()> {
+        let segment_data = self.storage.get(&segment_info.file_path).await?;
+        let writer = SegmentWriter::new(schema.clone())?;
+        let reader = SegmentReader::new(writer.arrow_schema);
+        let documents = reader.read_parquet(segment_data)?;
+
+        for doc in &documents {
+            for (field_name, value) in &doc.attributes {
+                if let AttributeValue::String(text) = value {
+                    all_texts
+                        .entry(field_name.clone())
+                        .or_insert_with(Vec::new)
+                        .push((doc.id, text.clone()));
+                }
             }
         }
 
@@ -315,7 +421,65 @@ impl Namespace {
         let min_id = *ids.iter().min().unwrap();
         let max_id = *ids.iter().max().unwrap();
 
-        // Create segment info
+        // Build and persist per-segment vector index
+        let vector_index_path = {
+            let vectors_to_index: Vec<_> = documents
+                .iter()
+                .filter_map(|doc| doc.vector.as_ref().map(|v| (doc.id, v.clone())))
+                .collect();
+
+            if !vectors_to_index.is_empty() {
+                let (vec_ids, vectors): (Vec<_>, Vec<_>) = vectors_to_index.into_iter().unzip();
+
+                // Create a new index for this segment
+                let mut segment_vector_index =
+                    VectorIndex::new(schema.vector_dim, schema.vector_metric)?;
+                segment_vector_index.add(&vec_ids, &vectors)?;
+
+                // Persist to storage
+                let path = segment_vector_index
+                    .build_and_persist(self.storage.clone(), &segment_id, &self.name)
+                    .await?;
+                Some(path)
+            } else {
+                None
+            }
+        };
+
+        // Build and persist per-segment full-text indexes
+        let mut fulltext_index_paths = HashMap::new();
+        for (field_name, attr_schema) in &schema.attributes {
+            if !attr_schema.full_text.is_enabled() {
+                continue;
+            }
+
+            // Extract texts for this field
+            let texts: Vec<(DocId, String)> = documents
+                .iter()
+                .filter_map(|doc| {
+                    doc.attributes.get(field_name).and_then(|v| match v {
+                        AttributeValue::String(s) => Some((doc.id, s.clone())),
+                        _ => None,
+                    })
+                })
+                .collect();
+
+            if !texts.is_empty() {
+                let index_path = FullTextIndex::build_and_persist(
+                    field_name.clone(),
+                    attr_schema.full_text.clone(),
+                    &texts,
+                    self.storage.clone(),
+                    &segment_id,
+                    &self.name,
+                )
+                .await?;
+
+                fulltext_index_paths.insert(field_name.clone(), index_path);
+            }
+        }
+
+        // Create segment info with index paths
         let segment_info = SegmentInfo {
             segment_id: segment_id.clone(),
             file_path: segment_path.clone(),
@@ -323,6 +487,8 @@ impl Namespace {
             id_range: (min_id, max_id),
             created_at: chrono::Utc::now(),
             tombstones: vec![],
+            vector_index_path,
+            fulltext_index_paths,
         };
 
         // Update manifest
@@ -690,7 +856,66 @@ impl Namespace {
         let min_id = *ids.iter().min().unwrap();
         let max_id = *ids.iter().max().unwrap();
 
-        // Create segment info
+        tracing::info!("Wrote merged segment: {} ({} docs)", new_segment_id, all_documents.len());
+
+        // Build per-segment indexes (same as upsert_internal)
+        let schema = self.manifest.read().await.schema.clone();
+
+        // Build vector index
+        let vector_index_path = {
+            let vectors_to_index: Vec<_> = all_documents
+                .iter()
+                .filter_map(|doc| doc.vector.as_ref().map(|v| (doc.id, v.clone())))
+                .collect();
+
+            if !vectors_to_index.is_empty() {
+                let (vec_ids, vectors): (Vec<_>, Vec<_>) = vectors_to_index.into_iter().unzip();
+                let mut segment_vector_index =
+                    VectorIndex::new(schema.vector_dim, schema.vector_metric)?;
+                segment_vector_index.add(&vec_ids, &vectors)?;
+
+                let path = segment_vector_index
+                    .build_and_persist(self.storage.clone(), &new_segment_id, &self.name)
+                    .await?;
+                Some(path)
+            } else {
+                None
+            }
+        };
+
+        // Build full-text indexes
+        let mut fulltext_index_paths = HashMap::new();
+        for (field_name, attr_schema) in &schema.attributes {
+            if !attr_schema.full_text.is_enabled() {
+                continue;
+            }
+
+            let texts: Vec<(DocId, String)> = all_documents
+                .iter()
+                .filter_map(|doc| {
+                    doc.attributes.get(field_name).and_then(|v| match v {
+                        AttributeValue::String(s) => Some((doc.id, s.clone())),
+                        _ => None,
+                    })
+                })
+                .collect();
+
+            if !texts.is_empty() {
+                let index_path = FullTextIndex::build_and_persist(
+                    field_name.clone(),
+                    attr_schema.full_text.clone(),
+                    &texts,
+                    self.storage.clone(),
+                    &new_segment_id,
+                    &self.name,
+                )
+                .await?;
+
+                fulltext_index_paths.insert(field_name.clone(), index_path);
+            }
+        }
+
+        // Create segment info with index paths
         let segment_info = SegmentInfo {
             segment_id: new_segment_id.clone(),
             file_path: segment_path.clone(),
@@ -698,9 +923,11 @@ impl Namespace {
             id_range: (min_id, max_id),
             created_at: chrono::Utc::now(),
             tombstones: Vec::new(),
+            vector_index_path,
+            fulltext_index_paths,
         };
 
-        tracing::info!("Wrote merged segment: {}", new_segment_id);
+        tracing::info!("Built per-segment indexes for merged segment");
 
         // Step 4: Rebuild indexes with merged segment data only
         // Note: We only rebuild with documents from merged segments, not all documents

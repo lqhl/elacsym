@@ -164,6 +164,12 @@ pub struct SegmentInfo {
     /// Tombstone: marks deleted documents
     #[serde(default)]
     pub tombstones: Vec<DocId>,
+    /// Vector index path (RaBitQ)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_index_path: Option<String>,
+    /// Full-text index paths (field_name -> index_path)
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub fulltext_index_paths: HashMap<String, String>,
 }
 
 /// Namespace statistics

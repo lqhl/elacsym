@@ -2,7 +2,13 @@
 //!
 //! Provides BM25-based full-text search for string attributes.
 
-use std::path::Path;
+use bytes::Bytes;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
@@ -11,6 +17,7 @@ use tantivy::tokenizer::{
 };
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy};
 
+use crate::storage::StorageBackend;
 use crate::types::{DocId, FullTextConfig};
 use crate::{Error, Result};
 
@@ -293,6 +300,128 @@ impl FullTextIndex {
     pub fn num_docs(&self) -> u64 {
         self.reader.searcher().num_docs()
     }
+
+    /// Build segment-level index and persist to storage
+    ///
+    /// This creates a per-segment Tantivy index for a single text field:
+    /// 1. Creates temporary directory
+    /// 2. Builds Tantivy index on disk
+    /// 3. Compresses index directory to .tar.gz
+    /// 4. Uploads to storage
+    pub async fn build_and_persist(
+        field_name: String,
+        config: FullTextConfig,
+        documents: &[(DocId, String)],
+        storage: Arc<dyn StorageBackend>,
+        segment_id: &str,
+        namespace: &str,
+    ) -> Result<String> {
+        if documents.is_empty() {
+            return Err(Error::internal("Cannot persist empty full-text index"));
+        }
+
+        // 1. Create temporary directory for Tantivy
+        let temp_dir = std::env::temp_dir().join(format!(
+            "tantivy_{}_{}",
+            segment_id,
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&temp_dir).map_err(|e| {
+            Error::internal(format!("Failed to create temp directory: {}", e))
+        })?;
+
+        // 2. Build index on disk
+        let mut index = Self::new_persistent(field_name.clone(), &temp_dir)?;
+        index.add_documents(documents)?;
+
+        // Ensure all changes are committed
+        index.writer.commit().map_err(|e| {
+            Error::internal(format!("Failed to commit Tantivy index: {}", e))
+        })?;
+
+        // 3. Compress index directory to tarball
+        tracing::info!(
+            "Compressing Tantivy index for field '{}' ({} docs)",
+            field_name,
+            documents.len()
+        );
+        let tarball = compress_directory(&temp_dir)?;
+
+        // 4. Generate storage path
+        let index_path = format!(
+            "{}/segments/{}_{}.tantivy.tar.gz",
+            namespace, segment_id, field_name
+        );
+
+        // 5. Upload to storage
+        tracing::info!(
+            "Persisting full-text index to {} ({} bytes compressed)",
+            index_path,
+            tarball.len()
+        );
+        storage.put(&index_path, Bytes::from(tarball)).await?;
+
+        // 6. Cleanup temporary directory
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        Ok(index_path)
+    }
+
+    /// Load full-text index from storage
+    ///
+    /// Downloads and extracts a per-segment Tantivy index.
+    pub async fn load_from_storage(
+        storage: Arc<dyn StorageBackend>,
+        index_path: &str,
+        field_name: String,
+    ) -> Result<Self> {
+        tracing::info!("Loading full-text index from {}", index_path);
+
+        // 1. Download tarball
+        let tarball = storage.get(index_path).await?;
+
+        // 2. Extract to temporary directory
+        let temp_dir = std::env::temp_dir().join(format!("tantivy_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).map_err(|e| {
+            Error::internal(format!("Failed to create extraction directory: {}", e))
+        })?;
+
+        decompress_tarball(&tarball, &temp_dir)?;
+
+        // 3. Open Tantivy index
+        tracing::info!("Opened Tantivy index for field '{}'", field_name);
+        Self::new_persistent(field_name, &temp_dir)
+    }
+}
+
+/// Compress a directory to .tar.gz format
+fn compress_directory(dir: &Path) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let gz = GzEncoder::new(&mut buf, Compression::default());
+    let mut tar = tar::Builder::new(gz);
+
+    // Add all files in directory
+    tar.append_dir_all(".", dir).map_err(|e| {
+        Error::internal(format!("Failed to create tarball: {}", e))
+    })?;
+
+    tar.finish().map_err(|e| {
+        Error::internal(format!("Failed to finish tarball: {}", e))
+    })?;
+
+    Ok(buf)
+}
+
+/// Decompress .tar.gz to a directory
+fn decompress_tarball(data: &[u8], dest: &Path) -> Result<()> {
+    let gz = GzDecoder::new(data);
+    let mut tar = tar::Archive::new(gz);
+
+    tar.unpack(dest).map_err(|e| {
+        Error::internal(format!("Failed to extract tarball: {}", e))
+    })?;
+
+    Ok(())
 }
 
 #[cfg(test)]

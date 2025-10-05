@@ -58,6 +58,8 @@ uuid = { version = "1.11", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6.1"
 fastrand = "2.3"
+tar = "0.4"  # For compressing Tantivy indexes
+flate2 = "1.0"  # gzip compression
 
 # Configuration
 config = "0.14"
