@@ -62,7 +62,10 @@ impl Namespace {
         let mut fulltext_indexes = HashMap::new();
         for (field_name, attr_schema) in &schema.attributes {
             if attr_schema.full_text.is_enabled() {
-                let index = FullTextIndex::new(field_name.clone())?;
+                let index = FullTextIndex::new_with_config(
+                    field_name.clone(),
+                    attr_schema.full_text.clone(),
+                )?;
                 fulltext_indexes.insert(field_name.clone(), index);
             }
         }
@@ -102,7 +105,10 @@ impl Namespace {
         let mut fulltext_indexes = HashMap::new();
         for (field_name, attr_schema) in &manifest.schema.attributes {
             if attr_schema.full_text.is_enabled() {
-                let index = FullTextIndex::new(field_name.clone())?;
+                let index = FullTextIndex::new_with_config(
+                    field_name.clone(),
+                    attr_schema.full_text.clone(),
+                )?;
                 fulltext_indexes.insert(field_name.clone(), index);
             }
         }

@@ -6,9 +6,12 @@ use std::path::Path;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
+use tantivy::tokenizer::{
+    LowerCaser, RemoveLongFilter, SimpleTokenizer, Stemmer, StopWordFilter, TextAnalyzer,
+};
 use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy};
 
-use crate::types::DocId;
+use crate::types::{DocId, FullTextConfig};
 use crate::{Error, Result};
 
 /// Full-text search index for a single field
@@ -24,18 +27,48 @@ pub struct FullTextIndex {
 impl FullTextIndex {
     /// Create a new in-memory full-text index
     pub fn new(field_name: String) -> Result<Self> {
+        // Use default config (Simple(true) with english, stemming, stopwords)
+        let config = FullTextConfig::Advanced {
+            language: "english".to_string(),
+            stemming: true,
+            remove_stopwords: true,
+            case_sensitive: false,
+            tokenizer: "default".to_string(),
+        };
+        Self::new_with_config(field_name, config)
+    }
+
+    /// Create a new in-memory full-text index with custom configuration
+    pub fn new_with_config(field_name: String, config: FullTextConfig) -> Result<Self> {
+        // Create in-memory index first (need it for tokenizer registration)
+        let index = Index::create_in_ram(Schema::builder().build());
+
+        // Register custom analyzer based on config
+        let analyzer_name = Self::register_analyzer(&index, &config)?;
+
+        // Now build schema with the custom analyzer
         let mut schema_builder = Schema::builder();
 
         // ID field - used to map back to document IDs
         let id_field = schema_builder.add_u64_field("id", INDEXED | STORED);
 
-        // Text field - the actual searchable content
-        let text_field = schema_builder.add_text_field(&field_name, TEXT | STORED);
+        // Text field - with custom analyzer
+        let text_options = TextOptions::default()
+            .set_indexing_options(
+                TextFieldIndexing::default()
+                    .set_tokenizer(&analyzer_name)
+                    .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+            )
+            .set_stored();
+        let text_field = schema_builder.add_text_field(&field_name, text_options);
 
         let schema = schema_builder.build();
 
-        // Create in-memory index
+        // Recreate index with correct schema
         let index = Index::create_in_ram(schema);
+
+        // Re-register analyzer on new index
+        Self::register_analyzer(&index, &config)?;
 
         // Create reader with auto-reload
         let reader = index
@@ -57,6 +90,93 @@ impl FullTextIndex {
             text_field,
             field_name,
         })
+    }
+
+    /// Register custom text analyzer based on FullTextConfig
+    /// Returns the name of the registered analyzer
+    fn register_analyzer(index: &Index, config: &FullTextConfig) -> Result<String> {
+        let analyzer_name = "custom".to_string();
+
+        // Map language string to Tantivy Language enum
+        let language = match config.language() {
+            "arabic" => tantivy::tokenizer::Language::Arabic,
+            "danish" => tantivy::tokenizer::Language::Danish,
+            "dutch" => tantivy::tokenizer::Language::Dutch,
+            "english" => tantivy::tokenizer::Language::English,
+            "finnish" => tantivy::tokenizer::Language::Finnish,
+            "french" => tantivy::tokenizer::Language::French,
+            "german" => tantivy::tokenizer::Language::German,
+            "greek" => tantivy::tokenizer::Language::Greek,
+            "hungarian" => tantivy::tokenizer::Language::Hungarian,
+            "italian" => tantivy::tokenizer::Language::Italian,
+            "norwegian" => tantivy::tokenizer::Language::Norwegian,
+            "portuguese" => tantivy::tokenizer::Language::Portuguese,
+            "romanian" => tantivy::tokenizer::Language::Romanian,
+            "russian" => tantivy::tokenizer::Language::Russian,
+            "spanish" => tantivy::tokenizer::Language::Spanish,
+            "swedish" => tantivy::tokenizer::Language::Swedish,
+            "tamil" => tantivy::tokenizer::Language::Tamil,
+            "turkish" => tantivy::tokenizer::Language::Turkish,
+            _ => tantivy::tokenizer::Language::English, // Default to English
+        };
+
+        // Build analyzer chain - must be built in one go due to type changes
+        let analyzer = if config.case_sensitive() {
+            // Case-sensitive path
+            if config.remove_stopwords() && config.stemming() {
+                TextAnalyzer::builder(SimpleTokenizer::default())
+                    .filter(StopWordFilter::new(language).unwrap())
+                    .filter(Stemmer::new(language))
+                    .filter(RemoveLongFilter::limit(40))
+                    .build()
+            } else if config.remove_stopwords() {
+                TextAnalyzer::builder(SimpleTokenizer::default())
+                    .filter(StopWordFilter::new(language).unwrap())
+                    .filter(RemoveLongFilter::limit(40))
+                    .build()
+            } else if config.stemming() {
+                TextAnalyzer::builder(SimpleTokenizer::default())
+                    .filter(Stemmer::new(language))
+                    .filter(RemoveLongFilter::limit(40))
+                    .build()
+            } else {
+                TextAnalyzer::builder(SimpleTokenizer::default())
+                    .filter(RemoveLongFilter::limit(40))
+                    .build()
+            }
+        } else {
+            // Case-insensitive path (most common)
+            if config.remove_stopwords() && config.stemming() {
+                TextAnalyzer::builder(SimpleTokenizer::default())
+                    .filter(LowerCaser)
+                    .filter(StopWordFilter::new(language).unwrap())
+                    .filter(Stemmer::new(language))
+                    .filter(RemoveLongFilter::limit(40))
+                    .build()
+            } else if config.remove_stopwords() {
+                TextAnalyzer::builder(SimpleTokenizer::default())
+                    .filter(LowerCaser)
+                    .filter(StopWordFilter::new(language).unwrap())
+                    .filter(RemoveLongFilter::limit(40))
+                    .build()
+            } else if config.stemming() {
+                TextAnalyzer::builder(SimpleTokenizer::default())
+                    .filter(LowerCaser)
+                    .filter(Stemmer::new(language))
+                    .filter(RemoveLongFilter::limit(40))
+                    .build()
+            } else {
+                TextAnalyzer::builder(SimpleTokenizer::default())
+                    .filter(LowerCaser)
+                    .filter(RemoveLongFilter::limit(40))
+                    .build()
+            }
+        };
+
+        // Register the analyzer
+        index.tokenizers().register(&analyzer_name, analyzer);
+
+        Ok(analyzer_name)
     }
 
     /// Create a persistent full-text index on disk
