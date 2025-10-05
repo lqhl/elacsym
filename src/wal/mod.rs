@@ -269,6 +269,9 @@ impl WalManager {
     }
 
     /// Read all entries from a WAL file
+    ///
+    /// Gracefully handles corrupted entries by logging warnings and continuing.
+    /// This ensures partial WAL recovery is possible even with corruption.
     async fn read_wal_file(path: &Path) -> Result<Vec<WalEntry>> {
         let mut file = File::open(path)
             .await
@@ -296,29 +299,55 @@ impl WalManager {
             )));
         }
 
-        // Read entries
+        // Read entries with error recovery
         let mut entries = Vec::new();
+        let mut entry_index = 0;
         loop {
             // Read length
             let length = match file.read_u32().await {
                 Ok(len) => len,
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    // Normal EOF - we're done
+                    break;
+                }
                 Err(e) => {
-                    return Err(Error::internal(format!("Failed to read entry length: {}", e)))
+                    // Unexpected error reading length
+                    tracing::warn!("WAL entry {} corrupted (failed to read length): {}. Stopping recovery at this point.", entry_index, e);
+                    break;
                 }
             };
 
+            // Sanity check: reject unreasonably large entries (>100MB)
+            if length > 100 * 1024 * 1024 {
+                tracing::warn!("WAL entry {} has unreasonable length: {} bytes. Stopping recovery.", entry_index, length);
+                break;
+            }
+
             // Read data
             let mut data = vec![0u8; length as usize];
-            file.read_exact(&mut data)
-                .await
-                .map_err(|e| Error::internal(format!("Failed to read entry data: {}", e)))?;
+            if let Err(e) = file.read_exact(&mut data).await {
+                if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    // Truncated entry - log and stop
+                    tracing::warn!("WAL entry {} truncated (expected {} bytes). Stopping recovery.", entry_index, length);
+                } else {
+                    tracing::warn!("WAL entry {} corrupted (failed to read data): {}. Stopping recovery.", entry_index, e);
+                }
+                break;
+            }
 
             // Read CRC
-            let stored_crc = file
-                .read_u32()
-                .await
-                .map_err(|e| Error::internal(format!("Failed to read entry CRC: {}", e)))?;
+            let stored_crc = match file.read_u32().await {
+                Ok(crc) => crc,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    // Truncated CRC
+                    tracing::warn!("WAL entry {} missing CRC. Stopping recovery.", entry_index);
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("WAL entry {} corrupted (failed to read CRC): {}. Stopping recovery.", entry_index, e);
+                    break;
+                }
+            };
 
             // Verify CRC
             let mut crc_data = BytesMut::with_capacity(4 + data.len());
@@ -327,14 +356,37 @@ impl WalManager {
             let calculated_crc = crc32fast::hash(&crc_data);
 
             if calculated_crc != stored_crc {
-                return Err(Error::internal("WAL entry CRC mismatch"));
+                // CRC mismatch - log and skip this entry
+                tracing::warn!(
+                    "WAL entry {} CRC mismatch (expected: {}, got: {}). Skipping corrupted entry.",
+                    entry_index, stored_crc, calculated_crc
+                );
+                entry_index += 1;
+                continue;
             }
 
             // Deserialize entry
-            let entry: WalEntry = rmp_serde::from_slice(&data)
-                .map_err(|e| Error::internal(format!("Failed to deserialize WAL entry: {}", e)))?;
+            let entry: WalEntry = match rmp_serde::from_slice(&data) {
+                Ok(e) => e,
+                Err(e) => {
+                    // Deserialization failed - log and skip
+                    tracing::warn!("WAL entry {} failed to deserialize: {}. Skipping.", entry_index, e);
+                    entry_index += 1;
+                    continue;
+                }
+            };
 
             entries.push(entry);
+            entry_index += 1;
+        }
+
+        if entry_index > 0 && entries.is_empty() {
+            tracing::warn!("All {} WAL entries were corrupted. No operations recovered.", entry_index);
+        } else if entry_index > entries.len() {
+            tracing::warn!(
+                "Recovered {}/{} WAL entries. {} entries were corrupted or truncated.",
+                entries.len(), entry_index, entry_index - entries.len()
+            );
         }
 
         Ok(entries)

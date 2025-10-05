@@ -13,9 +13,24 @@ use crate::namespace::NamespaceManager;
 use crate::query::{QueryRequest, QueryResponse, QueryResult};
 use crate::types::{Document, Schema};
 
-/// Health check
-pub async fn health() -> &'static str {
-    "OK"
+/// Health check with system status
+pub async fn health(
+    State(manager): State<Arc<NamespaceManager>>,
+) -> Result<Json<HealthResponse>, (StatusCode, String)> {
+    let namespaces = manager.list_namespaces().await;
+
+    Ok(Json(HealthResponse {
+        status: "healthy".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        namespaces: namespaces.len(),
+    }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct HealthResponse {
+    pub status: String,
+    pub version: String,
+    pub namespaces: usize,
 }
 
 /// Create or update namespace
