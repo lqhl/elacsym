@@ -200,12 +200,12 @@ impl SegmentWriter {
 
 /// Segment reader for reading Parquet files
 pub struct SegmentReader {
-    schema: Arc<ArrowSchema>,
+    _schema: Arc<ArrowSchema>,
 }
 
 impl SegmentReader {
     pub fn new(schema: Arc<ArrowSchema>) -> Self {
-        Self { schema }
+        Self { _schema: schema }
     }
 
     /// Read specific documents by IDs from Parquet bytes

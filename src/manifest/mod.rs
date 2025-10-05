@@ -114,7 +114,7 @@ impl ManifestManager {
             .storage
             .get(&key)
             .await
-            .map_err(|e| Error::NamespaceNotFound(namespace.to_string()))?;
+            .map_err(|_e| Error::NamespaceNotFound(namespace.to_string()))?;
 
         let json = String::from_utf8(data.to_vec())
             .map_err(|e| Error::internal(format!("Invalid UTF-8 in manifest: {}", e)))?;
