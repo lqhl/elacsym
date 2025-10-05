@@ -448,10 +448,13 @@ impl WalManager {
                 .map_err(|e| Error::internal(format!("Failed to open /dev/null: {}", e)))?,
         ));
 
-        // Remove old file
-        tokio::fs::remove_file(&self.current_path)
-            .await
-            .map_err(|e| Error::internal(format!("Failed to remove WAL file: {}", e)))?;
+        // Remove old file (ignore if it doesn't exist)
+        if let Err(e) = tokio::fs::remove_file(&self.current_path).await {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(Error::internal(format!("Failed to remove WAL file: {}", e)));
+            }
+            // If file doesn't exist, that's fine - it means it was already cleaned up
+        }
 
         // Create new file
         self.next_sequence = 0;
