@@ -162,7 +162,7 @@ disk_size = 107374182400  # 100GB
 
 ## Development Roadmap
 
-### Phase 1: MVP (Current - 100% Complete ✅)
+### Phase 1: MVP + Core Query Features (Current - 85% Complete ✅)
 - [x] Project structure
 - [x] Storage abstraction (S3 + Local FS)
 - [x] Basic types and error handling
@@ -171,16 +171,27 @@ disk_size = 107374182400  # 100GB
 - [x] RaBitQ vector index integration (with tests)
 - [x] Namespace manager (with tests)
 - [x] HTTP API endpoints (Upsert + Query)
-- [ ] Query executor with filtering
-
-**Current Status**: **MVP Complete!** HTTP API is working. You can create namespaces, upsert documents, and perform vector search via REST endpoints. All 8 unit tests passing. Server runs on port 3000.
-
-### Phase 2: Advanced Features
-- [ ] Foyer cache integration
+- [x] **Segment document retrieval** ✨ NEW
+- [x] **Foyer cache integration** ✨ NEW
+- [x] **Query returns full documents with attributes** ✨ NEW
+- [ ] Attribute filtering execution
 - [ ] Tantivy full-text search
-- [ ] Attribute filtering
-- [ ] Hybrid search with RRF
+
+**Current Status**: **Query pipeline complete!** Vector search now returns full documents with attributes. Foyer cache (Memory + Disk) is integrated for segment caching. All 11 unit tests passing. Server runs on port 3000.
+
+**Recent Improvements (Session 5)**:
+- ✅ Implemented `SegmentReader::read_documents_by_ids()` for efficient document retrieval
+- ✅ Integrated Foyer cache with `get_or_fetch()` pattern for segments
+- ✅ Updated `Namespace::query()` to fetch and return complete documents
+- ✅ Added cache configuration with environment variables (`ELACSYM_CACHE_PATH`, `ELACSYM_DISABLE_CACHE`)
+- ✅ Query responses now include vectors and attributes (controllable via `include_vector`, `include_attributes`)
+
+### Phase 2: Advanced Features (Next Up)
+- [ ] Attribute filtering execution (types defined, executor needed)
+- [ ] Tantivy full-text search integration
+- [ ] Hybrid search with RRF fusion
 - [ ] Tombstone-based deletion
+- [ ] WAL for write durability
 
 ### Phase 3: Production Ready
 - [ ] LSM-tree style compaction

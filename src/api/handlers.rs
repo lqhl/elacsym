@@ -88,25 +88,51 @@ pub async fn query(
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
 
-    // For now, only support vector query
-    // TODO: Add full-text and filter support
-    let query_vector = payload
-        .vector
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Vector is required".to_string()))?;
+    // At least one of vector or full_text must be provided
+    if payload.vector.is_none() && payload.full_text.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "At least one of 'vector' or 'full_text' must be provided".to_string(),
+        ));
+    }
 
     let search_results = ns
-        .query(&query_vector, payload.top_k)
+        .query(
+            payload.vector.as_deref(),
+            payload.full_text.as_ref(),
+            payload.top_k,
+            payload.filter.as_ref(),
+        )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Convert to QueryResult format
     let results: Vec<QueryResult> = search_results
         .into_iter()
-        .map(|(id, distance)| QueryResult {
-            id,
-            score: distance,
-            vector: None,
-            attributes: std::collections::HashMap::new(),
+        .map(|(document, distance)| {
+            let vector = if payload.include_vector {
+                document.vector
+            } else {
+                None
+            };
+
+            // Filter attributes based on include_attributes
+            let attributes = if payload.include_attributes.is_empty() {
+                document.attributes
+            } else {
+                document
+                    .attributes
+                    .into_iter()
+                    .filter(|(k, _)| payload.include_attributes.contains(k))
+                    .collect()
+            };
+
+            QueryResult {
+                id: document.id,
+                score: distance,
+                vector,
+                attributes,
+            }
         })
         .collect();
 

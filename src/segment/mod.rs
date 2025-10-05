@@ -208,6 +208,20 @@ impl SegmentReader {
         Self { schema }
     }
 
+    /// Read specific documents by IDs from Parquet bytes
+    pub fn read_documents_by_ids(&self, data: Bytes, doc_ids: &[u64]) -> Result<Vec<Document>> {
+        let all_docs = self.read_parquet(data)?;
+
+        // Filter by requested IDs
+        let id_set: std::collections::HashSet<u64> = doc_ids.iter().copied().collect();
+        let filtered_docs: Vec<Document> = all_docs
+            .into_iter()
+            .filter(|doc| id_set.contains(&doc.id))
+            .collect();
+
+        Ok(filtered_docs)
+    }
+
     /// Read documents from Parquet bytes
     pub fn read_parquet(&self, data: Bytes) -> Result<Vec<Document>> {
         let builder = ParquetRecordBatchReaderBuilder::try_new(data)

@@ -51,6 +51,87 @@ pub enum AttributeType {
     StringArray,
 }
 
+/// Full-text search configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FullTextConfig {
+    /// Simple boolean flag (backward compatible)
+    Simple(bool),
+    /// Advanced configuration
+    Advanced {
+        #[serde(default = "default_language")]
+        language: String,
+        #[serde(default = "default_true")]
+        stemming: bool,
+        #[serde(default = "default_true")]
+        remove_stopwords: bool,
+        #[serde(default)]
+        case_sensitive: bool,
+        #[serde(default = "default_tokenizer")]
+        tokenizer: String,
+    },
+}
+
+fn default_language() -> String {
+    "english".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_tokenizer() -> String {
+    "default".to_string()
+}
+
+impl Default for FullTextConfig {
+    fn default() -> Self {
+        FullTextConfig::Simple(false)
+    }
+}
+
+impl FullTextConfig {
+    /// Check if full-text search is enabled
+    pub fn is_enabled(&self) -> bool {
+        match self {
+            FullTextConfig::Simple(enabled) => *enabled,
+            FullTextConfig::Advanced { .. } => true,
+        }
+    }
+
+    /// Get language setting
+    pub fn language(&self) -> &str {
+        match self {
+            FullTextConfig::Simple(_) => "english",
+            FullTextConfig::Advanced { language, .. } => language,
+        }
+    }
+
+    /// Get stemming setting
+    pub fn stemming(&self) -> bool {
+        match self {
+            FullTextConfig::Simple(_) => true,
+            FullTextConfig::Advanced { stemming, .. } => *stemming,
+        }
+    }
+
+    /// Get stopwords setting
+    pub fn remove_stopwords(&self) -> bool {
+        match self {
+            FullTextConfig::Simple(_) => true,
+            FullTextConfig::Advanced { remove_stopwords, .. } => *remove_stopwords,
+        }
+    }
+
+    /// Get case sensitivity setting
+    pub fn case_sensitive(&self) -> bool {
+        match self {
+            FullTextConfig::Simple(_) => false,
+            FullTextConfig::Advanced { case_sensitive, .. } => *case_sensitive,
+        }
+    }
+}
+
 /// Attribute schema configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttributeSchema {
@@ -59,7 +140,7 @@ pub struct AttributeSchema {
     #[serde(default)]
     pub indexed: bool,
     #[serde(default)]
-    pub full_text: bool,
+    pub full_text: FullTextConfig,
 }
 
 /// Namespace schema

@@ -1,9 +1,14 @@
 //! Query execution engine
 
+pub mod executor;
+pub mod fusion;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::types::{AttributeValue, DistanceMetric, DocId, Vector};
+
+pub use executor::FilterExecutor;
 
 /// Query request
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,11 +39,56 @@ fn default_metric() -> DistanceMetric {
 
 /// Full-text search query
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FullTextQuery {
-    pub field: String,
-    pub query: String,
-    #[serde(default = "default_weight")]
-    pub weight: f32,
+#[serde(untagged)]
+pub enum FullTextQuery {
+    /// Single field search
+    Single {
+        field: String,
+        query: String,
+        #[serde(default = "default_weight")]
+        weight: f32,
+    },
+    /// Multi-field search with per-field weights
+    Multi {
+        fields: Vec<String>,
+        query: String,
+        #[serde(default)]
+        weights: std::collections::HashMap<String, f32>,
+    },
+}
+
+impl FullTextQuery {
+    /// Get the query text
+    pub fn query_text(&self) -> &str {
+        match self {
+            FullTextQuery::Single { query, .. } => query,
+            FullTextQuery::Multi { query, .. } => query,
+        }
+    }
+
+    /// Get all fields involved in the query
+    pub fn fields(&self) -> Vec<&str> {
+        match self {
+            FullTextQuery::Single { field, .. } => vec![field.as_str()],
+            FullTextQuery::Multi { fields, .. } => fields.iter().map(|s| s.as_str()).collect(),
+        }
+    }
+
+    /// Get weight for a specific field
+    pub fn field_weight(&self, field_name: &str) -> f32 {
+        match self {
+            FullTextQuery::Single { field, weight, .. } => {
+                if field == field_name {
+                    *weight
+                } else {
+                    0.0
+                }
+            }
+            FullTextQuery::Multi { weights, .. } => {
+                weights.get(field_name).copied().unwrap_or(1.0)
+            }
+        }
+    }
 }
 
 fn default_weight() -> f32 {

@@ -3,7 +3,7 @@
 > 本文档专为 Claude Code 准备，用于跨会话工作时快速上下文恢复
 
 **最后更新**: 2025-10-05
-**项目状态**: 🎉 **Phase 1 MVP 完成！** HTTP API 已上线，服务器运行正常
+**项目状态**: 🚀 **Phase 1.5 完成！** 查询流程端到端可用，带缓存优化
 
 ---
 
@@ -23,16 +23,24 @@
 - [x] API 路由框架
 - [x] 设计文档 (docs/DESIGN.md)
 - [x] CLAUDE.md 工作指南
+- [x] **Segment 文档读取功能** ✨ NEW (Session 5)
+- [x] **Foyer 缓存集成（Memory + Disk）** ✨ NEW (Session 5)
+- [x] **完整查询流程：索引搜索 → 读取 Segment → 返回文档** ✨ NEW (Session 5)
 
-**✨ MVP 已可用**: HTTP API 正常工作！可以通过 REST API 创建命名空间、写入文档、执行向量搜索。服务器运行在端口 3000。
+**✨ 当前可用功能**:
+- ✅ 创建 namespace (PUT /v1/namespaces/:namespace)
+- ✅ 插入文档 (POST /v1/namespaces/:namespace/upsert)
+- ✅ 向量查询 (POST /v1/namespaces/:namespace/query) - **返回完整文档！**
+- ✅ 缓存加速（segments 自动缓存到 Memory/Disk）
+- ✅ 服务器运行在端口 3000
 
-### 🎯 下一步（Phase 2）
+### 🎯 下一步（Phase 2 - 高优先级）
 
 ### 📅 待办
-- [ ] Foyer 缓存集成
-- [ ] Tantivy 全文搜索
-- [ ] 属性过滤和索引
-- [ ] 混合搜索（RRF）
+- [ ] **属性过滤执行器** - QueryRequest 类型已定义，需要实现执行逻辑
+- [ ] **Tantivy 全文搜索** - 集成 BM25
+- [ ] **混合搜索 RRF** - Late Fusion 融合算法
+- [ ] **WAL 写入日志** - 保证一致性（生产必需）
 - [ ] Tombstone 删除机制
 - [ ] LSM-tree 风格的 Compaction
 - [ ] 分布式支持
@@ -395,6 +403,37 @@ cargo update
 ---
 
 ## 🔄 变更日志
+
+### 2025-10-05 (Session 5 - 查询流程完善 + 缓存集成 ✅)
+- ✅ 实现 Segment 文档读取功能
+  - `SegmentReader::read_documents_by_ids()` - 按 ID 过滤读取
+  - 利用 HashSet 高效查找
+- ✅ 实现 Foyer 缓存集成
+  - `CacheManager` 完整实现（替换 stub）
+  - Memory + Disk 两层缓存
+  - `get_or_fetch()` 模式简化缓存逻辑
+  - 缓存键设计：`manifest:{ns}`, `vidx:{ns}`, `seg:{ns}:{seg_id}`
+- ✅ 更新 Namespace::query() 完整流程
+  - Step 1: 向量索引搜索 → 候选 doc_ids
+  - Step 2: 按 segment 分组
+  - Step 3: 从缓存/存储读取 segment 数据
+  - Step 4: 提取文档并按顺序返回
+- ✅ 更新 API handlers
+  - 支持 `include_vector` / `include_attributes` 控制返回字段
+  - 查询响应包含完整文档数据
+- ✅ 集成到 main.rs
+  - 环境变量 `ELACSYM_CACHE_PATH` 配置缓存路径
+  - 环境变量 `ELACSYM_DISABLE_CACHE` 可禁用缓存
+  - 缓存初始化失败时降级为无缓存模式
+- ✅ 更新文档（README + CLAUDE.md）
+
+**技术亮点**:
+- **缓存策略学习 Turbopuffer**: Segment 数据缓存到 Disk，Manifest/Index 缓存到 Memory
+- **查询流程完整**: 不再只返回 ID，而是完整的 Document 对象
+- **优雅降级**: 缓存不可用时自动回退到直接存储读取
+- **环境变量配置**: 灵活控制缓存行为
+
+**测试状态**: 11/11 单元测试通过（新增 3 个缓存测试）
 
 ### 2025-10-05 (Session 4 - HTTP API 完成 ✅)
 - ✅ 实现 NamespaceManager 状态管理

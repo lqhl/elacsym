@@ -1,0 +1,404 @@
+//! Write-Ahead Log (WAL) for durability guarantees
+//!
+//! Provides crash-safe writes by logging operations before they're committed.
+//! Inspired by Turbopuffer's WAL design.
+
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::types::{Document, DocId};
+use crate::{Error, Result};
+
+/// WAL operation types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WalOperation {
+    /// Insert or update documents
+    Upsert { documents: Vec<Document> },
+    /// Delete documents
+    Delete { ids: Vec<DocId> },
+    /// Commit a batch of operations
+    Commit { batch_id: u64 },
+}
+
+/// WAL entry with metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalEntry {
+    /// Sequence number (monotonically increasing)
+    pub sequence: u64,
+    /// Timestamp
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Operation
+    pub operation: WalOperation,
+}
+
+/// WAL file format:
+/// - Magic bytes: "EWAL" (4 bytes)
+/// - Version: u32 (4 bytes)
+/// - Entries: [Entry]*
+///
+/// Each entry:
+/// - Length: u32 (4 bytes) - length of serialized entry
+/// - Data: serialized WalEntry (msgpack)
+/// - CRC32: u32 (4 bytes) - checksum of length + data
+
+const WAL_MAGIC: &[u8; 4] = b"EWAL";
+const WAL_VERSION: u32 = 1;
+
+/// Write-Ahead Log manager
+pub struct WalManager {
+    /// Directory for WAL files
+    wal_dir: PathBuf,
+    /// Current WAL file
+    current_file: File,
+    /// Current WAL file path
+    current_path: PathBuf,
+    /// Next sequence number
+    next_sequence: u64,
+}
+
+impl WalManager {
+    /// Create a new WAL manager
+    pub async fn new<P: AsRef<Path>>(wal_dir: P) -> Result<Self> {
+        let wal_dir = wal_dir.as_ref().to_path_buf();
+
+        // Create WAL directory if it doesn't exist
+        tokio::fs::create_dir_all(&wal_dir)
+            .await
+            .map_err(|e| Error::internal(format!("Failed to create WAL directory: {}", e)))?;
+
+        // Create initial WAL file
+        let current_path = wal_dir.join("wal_000000.log");
+        let mut current_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&current_path)
+            .await
+            .map_err(|e| Error::internal(format!("Failed to open WAL file: {}", e)))?;
+
+        // Write header if file is empty
+        let metadata = current_file
+            .metadata()
+            .await
+            .map_err(|e| Error::internal(format!("Failed to get file metadata: {}", e)))?;
+
+        let next_sequence = if metadata.len() == 0 {
+            // New file - write header
+            current_file
+                .write_all(WAL_MAGIC)
+                .await
+                .map_err(|e| Error::internal(format!("Failed to write WAL magic: {}", e)))?;
+            current_file
+                .write_u32(WAL_VERSION)
+                .await
+                .map_err(|e| Error::internal(format!("Failed to write WAL version: {}", e)))?;
+            current_file
+                .flush()
+                .await
+                .map_err(|e| Error::internal(format!("Failed to flush WAL: {}", e)))?;
+            0
+        } else {
+            // Existing file - read last sequence
+            Self::read_last_sequence(&current_path).await?
+        };
+
+        Ok(Self {
+            wal_dir,
+            current_file,
+            current_path,
+            next_sequence,
+        })
+    }
+
+    /// Append an operation to the WAL
+    pub async fn append(&mut self, operation: WalOperation) -> Result<u64> {
+        let entry = WalEntry {
+            sequence: self.next_sequence,
+            timestamp: chrono::Utc::now(),
+            operation,
+        };
+
+        // Serialize entry using msgpack
+        let data = rmp_serde::to_vec(&entry)
+            .map_err(|e| Error::internal(format!("Failed to serialize WAL entry: {}", e)))?;
+
+        // Create buffer for entry
+        let mut buffer = BytesMut::with_capacity(4 + data.len() + 4);
+        buffer.put_u32(data.len() as u32);
+        buffer.put_slice(&data);
+
+        // Calculate CRC32
+        let crc = crc32fast::hash(&buffer);
+        buffer.put_u32(crc);
+
+        // Write to file
+        self.current_file
+            .write_all(&buffer)
+            .await
+            .map_err(|e| Error::internal(format!("Failed to write WAL entry: {}", e)))?;
+
+        // Flush to ensure durability
+        self.current_file
+            .flush()
+            .await
+            .map_err(|e| Error::internal(format!("Failed to flush WAL: {}", e)))?;
+
+        let seq = self.next_sequence;
+        self.next_sequence += 1;
+        Ok(seq)
+    }
+
+    /// Sync the WAL to disk
+    pub async fn sync(&mut self) -> Result<()> {
+        self.current_file
+            .sync_all()
+            .await
+            .map_err(|e| Error::internal(format!("Failed to sync WAL: {}", e)))
+    }
+
+    /// Read all entries from the WAL
+    pub async fn read_all(&self) -> Result<Vec<WalEntry>> {
+        Self::read_wal_file(&self.current_path).await
+    }
+
+    /// Read last sequence number from WAL file
+    async fn read_last_sequence(path: &Path) -> Result<u64> {
+        let entries = Self::read_wal_file(path).await?;
+        Ok(entries.last().map(|e| e.sequence + 1).unwrap_or(0))
+    }
+
+    /// Read all entries from a WAL file
+    async fn read_wal_file(path: &Path) -> Result<Vec<WalEntry>> {
+        let mut file = File::open(path)
+            .await
+            .map_err(|e| Error::internal(format!("Failed to open WAL file: {}", e)))?;
+
+        // Read and verify header
+        let mut magic = [0u8; 4];
+        file.read_exact(&mut magic)
+            .await
+            .map_err(|e| Error::internal(format!("Failed to read WAL magic: {}", e)))?;
+
+        if &magic != WAL_MAGIC {
+            return Err(Error::internal("Invalid WAL file: bad magic bytes"));
+        }
+
+        let version = file
+            .read_u32()
+            .await
+            .map_err(|e| Error::internal(format!("Failed to read WAL version: {}", e)))?;
+
+        if version != WAL_VERSION {
+            return Err(Error::internal(format!(
+                "Unsupported WAL version: {}",
+                version
+            )));
+        }
+
+        // Read entries
+        let mut entries = Vec::new();
+        loop {
+            // Read length
+            let length = match file.read_u32().await {
+                Ok(len) => len,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => {
+                    return Err(Error::internal(format!("Failed to read entry length: {}", e)))
+                }
+            };
+
+            // Read data
+            let mut data = vec![0u8; length as usize];
+            file.read_exact(&mut data)
+                .await
+                .map_err(|e| Error::internal(format!("Failed to read entry data: {}", e)))?;
+
+            // Read CRC
+            let stored_crc = file
+                .read_u32()
+                .await
+                .map_err(|e| Error::internal(format!("Failed to read entry CRC: {}", e)))?;
+
+            // Verify CRC
+            let mut crc_data = BytesMut::with_capacity(4 + data.len());
+            crc_data.put_u32(length);
+            crc_data.put_slice(&data);
+            let calculated_crc = crc32fast::hash(&crc_data);
+
+            if calculated_crc != stored_crc {
+                return Err(Error::internal("WAL entry CRC mismatch"));
+            }
+
+            // Deserialize entry
+            let entry: WalEntry = rmp_serde::from_slice(&data)
+                .map_err(|e| Error::internal(format!("Failed to deserialize WAL entry: {}", e)))?;
+
+            entries.push(entry);
+        }
+
+        Ok(entries)
+    }
+
+    /// Truncate the WAL (after successful persistence)
+    pub async fn truncate(&mut self) -> Result<()> {
+        // Close current file
+        drop(std::mem::replace(
+            &mut self.current_file,
+            // Temporary placeholder
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/dev/null")
+                .await
+                .map_err(|e| Error::internal(format!("Failed to open /dev/null: {}", e)))?,
+        ));
+
+        // Remove old file
+        tokio::fs::remove_file(&self.current_path)
+            .await
+            .map_err(|e| Error::internal(format!("Failed to remove WAL file: {}", e)))?;
+
+        // Create new file
+        self.next_sequence = 0;
+        let mut new_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.current_path)
+            .await
+            .map_err(|e| Error::internal(format!("Failed to create new WAL file: {}", e)))?;
+
+        // Write header
+        new_file
+            .write_all(WAL_MAGIC)
+            .await
+            .map_err(|e| Error::internal(format!("Failed to write WAL magic: {}", e)))?;
+        new_file
+            .write_u32(WAL_VERSION)
+            .await
+            .map_err(|e| Error::internal(format!("Failed to write WAL version: {}", e)))?;
+        new_file
+            .flush()
+            .await
+            .map_err(|e| Error::internal(format!("Failed to flush WAL: {}", e)))?;
+
+        self.current_file = new_file;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_wal_basic() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WalManager::new(temp_dir.path()).await.unwrap();
+
+        // Append operation
+        let doc = Document {
+            id: 1,
+            vector: Some(vec![0.1, 0.2, 0.3]),
+            attributes: Default::default(),
+        };
+
+        let seq = wal
+            .append(WalOperation::Upsert {
+                documents: vec![doc],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(seq, 0);
+
+        // Read back
+        let entries = wal.read_all().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].sequence, 0);
+    }
+
+    #[tokio::test]
+    async fn test_wal_multiple_entries() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WalManager::new(temp_dir.path()).await.unwrap();
+
+        // Append multiple operations
+        for i in 0..10 {
+            let doc = Document {
+                id: i,
+                vector: Some(vec![i as f32]),
+                attributes: Default::default(),
+            };
+
+            wal.append(WalOperation::Upsert {
+                documents: vec![doc],
+            })
+            .await
+            .unwrap();
+        }
+
+        // Read back
+        let entries = wal.read_all().await.unwrap();
+        assert_eq!(entries.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn test_wal_truncate() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WalManager::new(temp_dir.path()).await.unwrap();
+
+        // Append operation
+        let doc = Document {
+            id: 1,
+            vector: Some(vec![0.1]),
+            attributes: Default::default(),
+        };
+
+        wal.append(WalOperation::Upsert {
+            documents: vec![doc],
+        })
+        .await
+        .unwrap();
+
+        // Truncate
+        wal.truncate().await.unwrap();
+
+        // Should be empty
+        let entries = wal.read_all().await.unwrap();
+        assert_eq!(entries.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_wal_recovery() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Write some entries
+        {
+            let mut wal = WalManager::new(temp_dir.path()).await.unwrap();
+            for i in 0..5 {
+                let doc = Document {
+                    id: i,
+                    vector: Some(vec![i as f32]),
+                    attributes: Default::default(),
+                };
+
+                wal.append(WalOperation::Upsert {
+                    documents: vec![doc],
+                })
+                .await
+                .unwrap();
+            }
+        } // Drop WAL
+
+        // Reopen and verify recovery
+        let wal = WalManager::new(temp_dir.path()).await.unwrap();
+        assert_eq!(wal.next_sequence, 5);
+
+        let entries = wal.read_all().await.unwrap();
+        assert_eq!(entries.len(), 5);
+    }
+}

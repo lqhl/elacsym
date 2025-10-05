@@ -11,17 +11,21 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::index::VectorIndex;
+use crate::cache::CacheManager;
+use crate::index::{FullTextIndex, VectorIndex};
 use crate::manifest::{Manifest, ManifestManager};
+use crate::query::{fusion, FilterExecutor, FilterExpression, FullTextQuery};
 use crate::segment::{SegmentReader, SegmentWriter};
 use crate::storage::StorageBackend;
-use crate::types::{Document, Schema, SegmentInfo};
+use crate::types::{AttributeValue, Document, Schema, SegmentInfo};
+use crate::wal::{WalManager, WalOperation};
 use crate::{Error, Result};
 
 /// Namespace represents a collection of documents with a shared schema
 pub struct Namespace {
     name: String,
     storage: Arc<dyn StorageBackend>,
+    cache: Option<Arc<CacheManager>>,
     manifest_manager: ManifestManager,
 
     /// The manifest (protected by RwLock for concurrent access)
@@ -29,6 +33,12 @@ pub struct Namespace {
 
     /// Vector index (protected by RwLock for concurrent writes)
     vector_index: Arc<RwLock<VectorIndex>>,
+
+    /// Full-text indexes (one per full-text field)
+    fulltext_indexes: Arc<RwLock<HashMap<String, FullTextIndex>>>,
+
+    /// Write-Ahead Log for durability (protected by RwLock)
+    wal: Arc<RwLock<WalManager>>,
 }
 
 impl Namespace {
@@ -37,6 +47,7 @@ impl Namespace {
         name: String,
         schema: Schema,
         storage: Arc<dyn StorageBackend>,
+        cache: Option<Arc<CacheManager>>,
     ) -> Result<Self> {
         let manifest_manager = ManifestManager::new(storage.clone());
 
@@ -49,12 +60,28 @@ impl Namespace {
             schema.vector_metric,
         )?;
 
+        // Create full-text indexes for full_text fields
+        let mut fulltext_indexes = HashMap::new();
+        for (field_name, attr_schema) in &schema.attributes {
+            if attr_schema.full_text.is_enabled() {
+                let index = FullTextIndex::new(field_name.clone())?;
+                fulltext_indexes.insert(field_name.clone(), index);
+            }
+        }
+
+        // Create WAL directory for this namespace
+        let wal_dir = format!("wal/{}", name);
+        let wal = WalManager::new(&wal_dir).await?;
+
         Ok(Self {
             name,
             storage,
+            cache,
             manifest_manager,
             manifest: Arc::new(RwLock::new(manifest)),
             vector_index: Arc::new(RwLock::new(vector_index)),
+            fulltext_indexes: Arc::new(RwLock::new(fulltext_indexes)),
+            wal: Arc::new(RwLock::new(wal)),
         })
     }
 
@@ -62,6 +89,7 @@ impl Namespace {
     pub async fn load(
         name: String,
         storage: Arc<dyn StorageBackend>,
+        cache: Option<Arc<CacheManager>>,
     ) -> Result<Self> {
         let manifest_manager = ManifestManager::new(storage.clone());
 
@@ -74,6 +102,22 @@ impl Namespace {
             manifest.schema.vector_metric,
         )?;
 
+        // Create full-text indexes for full_text fields
+        let mut fulltext_indexes = HashMap::new();
+        for (field_name, attr_schema) in &manifest.schema.attributes {
+            if attr_schema.full_text.is_enabled() {
+                let index = FullTextIndex::new(field_name.clone())?;
+                fulltext_indexes.insert(field_name.clone(), index);
+            }
+        }
+
+        // Create/Load WAL
+        let wal_dir = format!("wal/{}", name);
+        let wal = WalManager::new(&wal_dir).await?;
+
+        // TODO: Replay WAL entries if any exist
+        // This would apply any uncommitted operations
+
         // TODO: Load existing vectors from segments into index
         // This would require reading all segments and rebuilding the index
         // For now, index will be built on first upsert
@@ -81,9 +125,12 @@ impl Namespace {
         Ok(Self {
             name,
             storage,
+            cache,
             manifest_manager,
             manifest: Arc::new(RwLock::new(manifest)),
             vector_index: Arc::new(RwLock::new(vector_index)),
+            fulltext_indexes: Arc::new(RwLock::new(fulltext_indexes)),
+            wal: Arc::new(RwLock::new(wal)),
         })
     }
 
@@ -109,6 +156,16 @@ impl Namespace {
                 }
             }
         }
+
+        // Step 1: Write to WAL first (durability guarantee)
+        let mut wal = self.wal.write().await;
+        let _wal_seq = wal
+            .append(WalOperation::Upsert {
+                documents: documents.clone(),
+            })
+            .await?;
+        wal.sync().await?; // Ensure WAL is flushed to disk
+        drop(wal);
 
         // Write segment to storage
         let segment_id = format!("seg_{}", chrono::Utc::now().timestamp_millis());
@@ -152,18 +209,211 @@ impl Namespace {
             let (ids, vectors): (Vec<_>, Vec<_>) = vectors_to_add.into_iter().unzip();
             index.add(&ids, &vectors)?;
         }
+        drop(index); // Release vector index lock
+
+        // Update full-text indexes
+        let mut ft_indexes = self.fulltext_indexes.write().await;
+        for (field_name, ft_index) in ft_indexes.iter_mut() {
+            // Extract texts for this field
+            let texts: Vec<(u64, String)> = documents
+                .iter()
+                .filter_map(|doc| {
+                    doc.attributes.get(field_name).and_then(|v| match v {
+                        AttributeValue::String(s) => Some((doc.id, s.clone())),
+                        _ => None,
+                    })
+                })
+                .collect();
+
+            if !texts.is_empty() {
+                ft_index.add_documents(&texts)?;
+            }
+        }
+
+        // Step 2: Truncate WAL after successful commit
+        // All data is now durable in segments + manifest + indexes
+        let mut wal = self.wal.write().await;
+        wal.truncate().await?;
 
         Ok(documents.len())
     }
 
-    /// Query the namespace
-    pub async fn query(&self, query_vector: &[f32], top_k: usize) -> Result<Vec<(u64, f32)>> {
-        // Search vector index
-        let mut index = self.vector_index.write().await;
-        let query_vec = query_vector.to_vec();
-        let results = index.search(&query_vec, top_k)?;
+    /// Query the namespace with full document retrieval
+    pub async fn query(
+        &self,
+        query_vector: Option<&[f32]>,
+        full_text_query: Option<&FullTextQuery>,
+        top_k: usize,
+        filter: Option<&FilterExpression>,
+    ) -> Result<Vec<(Document, f32)>> {
+        // Step 1: Apply filter if present
+        let filtered_ids = if let Some(filter_expr) = filter {
+            let manifest = self.manifest.read().await;
+            let segments = manifest.segments.clone();
+            let schema = manifest.schema.clone();
+            drop(manifest);
+
+            Some(
+                FilterExecutor::apply_filter(&segments, filter_expr, &schema, &*self.storage)
+                    .await?,
+            )
+        } else {
+            None
+        };
+
+        // Step 2: Execute vector search (if requested)
+        let vector_results = if let Some(vector) = query_vector {
+            let mut index = self.vector_index.write().await;
+            let query_vec = vector.to_vec();
+            let results = index.search(&query_vec, top_k * 2)?; // Over-sample for merging
+            drop(index);
+            Some(results)
+        } else {
+            None
+        };
+
+        // Step 3: Execute full-text search (if requested)
+        let fulltext_results = if let Some(ft_query) = full_text_query {
+            let ft_indexes = self.fulltext_indexes.read().await;
+
+            // Get all fields involved in the query
+            let fields = ft_query.fields();
+            let query_text = ft_query.query_text();
+
+            // Collect results from all fields
+            let mut field_results: Vec<Vec<(u64, f32)>> = Vec::new();
+
+            for field in &fields {
+                if let Some(index) = ft_indexes.get(*field) {
+                    let results = index.search(query_text, top_k * 2)?; // Over-sample
+
+                    // Apply field weight
+                    let weight = ft_query.field_weight(field);
+                    let weighted_results: Vec<(u64, f32)> = results
+                        .into_iter()
+                        .map(|(id, score)| (id, score * weight))
+                        .collect();
+
+                    field_results.push(weighted_results);
+                } else {
+                    return Err(Error::InvalidRequest(format!(
+                        "Field '{}' is not configured for full-text search",
+                        field
+                    )));
+                }
+            }
+
+            // Combine multi-field results
+            if !field_results.is_empty() {
+                Some(Self::combine_field_results(field_results, top_k))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Step 4: Merge results (simple union for Phase 1, RRF in Phase 2)
+        let mut combined_results = Self::merge_search_results(vector_results, fulltext_results, top_k);
+
+        // Step 5: Filter search results if we have a filter
+        if let Some(ref allowed_ids) = filtered_ids {
+            combined_results.retain(|(id, _)| allowed_ids.contains(id));
+        }
+
+        if combined_results.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Step 6: Group doc IDs by segment
+        let doc_ids: Vec<u64> = combined_results.iter().map(|(id, _)| *id).collect();
+        let manifest = self.manifest.read().await;
+        let segments = manifest.segments.clone();
+        drop(manifest);
+
+        // Create a map: segment_id -> doc_ids in that segment
+        let mut segment_to_docs: HashMap<String, Vec<u64>> = HashMap::new();
+
+        for doc_id in &doc_ids {
+            // Find which segment contains this doc_id
+            for segment in &segments {
+                if doc_id >= &segment.id_range.0 && doc_id <= &segment.id_range.1 {
+                    segment_to_docs
+                        .entry(segment.segment_id.clone())
+                        .or_insert_with(Vec::new)
+                        .push(*doc_id);
+                    break;
+                }
+            }
+        }
+
+        // Step 7: Fetch documents from segments (with caching)
+        let mut all_documents: HashMap<u64, Document> = HashMap::new();
+
+        for (segment_id, ids_in_segment) in segment_to_docs {
+            // Find segment info
+            let segment_info = segments
+                .iter()
+                .find(|s| s.segment_id == segment_id)
+                .ok_or_else(|| Error::internal(format!("Segment {} not found", segment_id)))?;
+
+            // Load segment data from storage (with cache)
+            let segment_data = if let Some(ref cache) = self.cache {
+                let cache_key = CacheManager::segment_key(&self.name, &segment_id);
+                let storage = self.storage.clone();
+                let path = segment_info.file_path.clone();
+
+                cache.get_or_fetch(&cache_key, || async move {
+                    storage.get(&path).await
+                }).await?
+            } else {
+                // No cache - fetch directly
+                self.storage.get(&segment_info.file_path).await?
+            };
+
+            // Read documents
+            let manifest_guard = self.manifest.read().await;
+            let arrow_schema = SegmentWriter::new(manifest_guard.schema.clone())?.arrow_schema;
+            drop(manifest_guard);
+
+            let reader = SegmentReader::new(arrow_schema);
+            let documents = reader.read_documents_by_ids(segment_data, &ids_in_segment)?;
+
+            // Store in map
+            for doc in documents {
+                all_documents.insert(doc.id, doc);
+            }
+        }
+
+        // Step 8: Assemble results in order
+        let mut results = Vec::with_capacity(combined_results.len());
+        for (doc_id, score) in combined_results {
+            if let Some(document) = all_documents.remove(&doc_id) {
+                results.push((document, score));
+            }
+        }
 
         Ok(results)
+    }
+
+    /// Combine results from multiple full-text fields
+    ///
+    /// Sum scores from all fields for each document ID
+    fn combine_field_results(field_results: Vec<Vec<(u64, f32)>>, top_k: usize) -> Vec<(u64, f32)> {
+        let mut combined: HashMap<u64, f32> = HashMap::new();
+
+        // Sum scores from all fields
+        for results in field_results {
+            for (id, score) in results {
+                *combined.entry(id).or_insert(0.0) += score;
+            }
+        }
+
+        // Sort by score and take top_k
+        let mut results: Vec<_> = combined.into_iter().collect();
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(top_k * 2); // Keep 2x for later merging
+        results
     }
 
     /// Get the namespace schema
@@ -177,11 +427,40 @@ impl Namespace {
         let manifest = self.manifest.read().await;
         manifest.stats.clone()
     }
+
+    /// Merge vector and full-text search results using RRF
+    ///
+    /// Uses Reciprocal Rank Fusion algorithm to combine results from
+    /// vector search and full-text search.
+    ///
+    /// # Arguments
+    /// * `vector_results` - Ranked list from vector search
+    /// * `fulltext_results` - Ranked list from full-text search
+    /// * `top_k` - Number of results to return
+    ///
+    /// # Returns
+    /// Combined results sorted by RRF score
+    fn merge_search_results(
+        vector_results: Option<Vec<(u64, f32)>>,
+        fulltext_results: Option<Vec<(u64, f32)>>,
+        top_k: usize,
+    ) -> Vec<(u64, f32)> {
+        // Use RRF fusion with equal weights (0.5, 0.5)
+        fusion::reciprocal_rank_fusion(
+            vector_results.as_deref(),
+            fulltext_results.as_deref(),
+            0.5, // vector weight
+            0.5, // fulltext weight
+            60.0, // RRF constant k
+            top_k,
+        )
+    }
 }
 
 /// NamespaceManager manages multiple namespaces
 pub struct NamespaceManager {
     storage: Arc<dyn StorageBackend>,
+    cache: Option<Arc<CacheManager>>,
     namespaces: Arc<RwLock<HashMap<String, Arc<Namespace>>>>,
 }
 
@@ -189,6 +468,16 @@ impl NamespaceManager {
     pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
         Self {
             storage,
+            cache: None,
+            namespaces: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Create a new NamespaceManager with cache
+    pub fn with_cache(storage: Arc<dyn StorageBackend>, cache: Arc<CacheManager>) -> Self {
+        Self {
+            storage,
+            cache: Some(cache),
             namespaces: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -208,7 +497,7 @@ impl NamespaceManager {
 
         // Create namespace
         let namespace = Arc::new(
-            Namespace::create(name.clone(), schema, self.storage.clone()).await?
+            Namespace::create(name.clone(), schema, self.storage.clone(), self.cache.clone()).await?
         );
 
         // Store in cache
@@ -230,7 +519,7 @@ impl NamespaceManager {
 
         // Try to load from storage
         let namespace = Arc::new(
-            Namespace::load(name.to_string(), self.storage.clone()).await?
+            Namespace::load(name.to_string(), self.storage.clone(), self.cache.clone()).await?
         );
 
         // Store in cache
@@ -291,7 +580,7 @@ mod tests {
         };
 
         // Create namespace
-        let ns = Namespace::create("test_ns".to_string(), schema, storage.clone())
+        let ns = Namespace::create("test_ns".to_string(), schema, storage.clone(), None)
             .await
             .unwrap();
 
@@ -335,32 +624,60 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
 
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "title".to_string(),
+            AttributeSchema {
+                attr_type: AttributeType::String,
+                indexed: false,
+                full_text: false,
+            },
+        );
+
         let schema = Schema {
             vector_dim: 64,
             vector_metric: DistanceMetric::L2,
-            attributes: HashMap::new(),
+            attributes,
         };
 
-        let ns = Namespace::create("test_ns".to_string(), schema, storage)
+        let ns = Namespace::create("test_ns".to_string(), schema, storage, None)
             .await
             .unwrap();
 
         // Add some documents
+        let mut attrs1 = HashMap::new();
+        attrs1.insert(
+            "title".to_string(),
+            AttributeValue::String("Doc 1".to_string()),
+        );
+
+        let mut attrs2 = HashMap::new();
+        attrs2.insert(
+            "title".to_string(),
+            AttributeValue::String("Doc 2".to_string()),
+        );
+
+        let mut attrs3 = HashMap::new();
+        attrs3.insert(
+            "title".to_string(),
+            AttributeValue::String("Doc 3".to_string()),
+        );
+
         let docs = vec![
             Document {
                 id: 1,
                 vector: Some(vec![1.0; 64]),
-                attributes: HashMap::new(),
+                attributes: attrs1,
             },
             Document {
                 id: 2,
                 vector: Some(vec![2.0; 64]),
-                attributes: HashMap::new(),
+                attributes: attrs2,
             },
             Document {
                 id: 3,
                 vector: Some(vec![3.0; 64]),
-                attributes: HashMap::new(),
+                attributes: attrs3,
             },
         ];
 
@@ -368,10 +685,309 @@ mod tests {
 
         // Query
         let query = vec![2.5; 64];
-        let results = ns.query(&query, 2).await.unwrap();
+        let results = ns.query(Some(&query), None, 2, None).await.unwrap();
 
         assert_eq!(results.len(), 2);
-        // Should return closest vectors
-        assert!(results.iter().any(|(id, _)| *id == 2 || *id == 3));
+        // Should return closest vectors with documents
+        assert!(results.iter().any(|(doc, _)| doc.id == 2 || doc.id == 3));
+
+        // Verify documents have attributes
+        for (doc, _distance) in &results {
+            assert!(doc.attributes.contains_key("title"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_namespace_query_with_filter() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
+
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "title".to_string(),
+            AttributeSchema {
+                attr_type: AttributeType::String,
+                indexed: false,
+                full_text: false,
+            },
+        );
+        attributes.insert(
+            "category".to_string(),
+            AttributeSchema {
+                attr_type: AttributeType::String,
+                indexed: true,
+                full_text: false,
+            },
+        );
+        attributes.insert(
+            "score".to_string(),
+            AttributeSchema {
+                attr_type: AttributeType::Float,
+                indexed: false,
+                full_text: false,
+            },
+        );
+
+        let schema = Schema {
+            vector_dim: 64,
+            vector_metric: DistanceMetric::L2,
+            attributes,
+        };
+
+        let ns = Namespace::create("test_ns".to_string(), schema, storage, None)
+            .await
+            .unwrap();
+
+        // Add documents with different categories
+        let mut attrs1 = HashMap::new();
+        attrs1.insert(
+            "title".to_string(),
+            AttributeValue::String("Tech Doc 1".to_string()),
+        );
+        attrs1.insert(
+            "category".to_string(),
+            AttributeValue::String("tech".to_string()),
+        );
+        attrs1.insert("score".to_string(), AttributeValue::Float(4.5));
+
+        let mut attrs2 = HashMap::new();
+        attrs2.insert(
+            "title".to_string(),
+            AttributeValue::String("Sports Doc 2".to_string()),
+        );
+        attrs2.insert(
+            "category".to_string(),
+            AttributeValue::String("sports".to_string()),
+        );
+        attrs2.insert("score".to_string(), AttributeValue::Float(3.5));
+
+        let mut attrs3 = HashMap::new();
+        attrs3.insert(
+            "title".to_string(),
+            AttributeValue::String("Tech Doc 3".to_string()),
+        );
+        attrs3.insert(
+            "category".to_string(),
+            AttributeValue::String("tech".to_string()),
+        );
+        attrs3.insert("score".to_string(), AttributeValue::Float(4.8));
+
+        let docs = vec![
+            Document {
+                id: 1,
+                vector: Some(vec![1.0; 64]),
+                attributes: attrs1,
+            },
+            Document {
+                id: 2,
+                vector: Some(vec![2.0; 64]),
+                attributes: attrs2,
+            },
+            Document {
+                id: 3,
+                vector: Some(vec![3.0; 64]),
+                attributes: attrs3,
+            },
+        ];
+
+        ns.upsert(docs).await.unwrap();
+
+        // Query with filter: category = "tech" AND score >= 4.0
+        let filter = crate::query::FilterExpression::And {
+            conditions: vec![
+                crate::query::FilterCondition {
+                    field: "category".to_string(),
+                    op: crate::query::FilterOp::Eq,
+                    value: AttributeValue::String("tech".to_string()),
+                },
+                crate::query::FilterCondition {
+                    field: "score".to_string(),
+                    op: crate::query::FilterOp::Gte,
+                    value: AttributeValue::Float(4.0),
+                },
+            ],
+        };
+
+        let query = vec![2.0; 64];
+        let results = ns.query(Some(&query), None, 10, Some(&filter)).await.unwrap();
+
+        // Should only return doc 1 and 3 (both tech with score >= 4.0)
+        assert_eq!(results.len(), 2);
+        for (doc, _) in &results {
+            let category = doc.attributes.get("category").unwrap();
+            assert_eq!(category, &AttributeValue::String("tech".to_string()));
+
+            let score = doc.attributes.get("score").unwrap();
+            match score {
+                AttributeValue::Float(s) => assert!(*s >= 4.0),
+                _ => panic!("Expected float score"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_namespace_fulltext_search() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
+
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "title".to_string(),
+            AttributeSchema {
+                attr_type: AttributeType::String,
+                indexed: false,
+                full_text: true, // Enable full-text search
+            },
+        );
+
+        let schema = Schema {
+            vector_dim: 64,
+            vector_metric: DistanceMetric::L2,
+            attributes,
+        };
+
+        let ns = Namespace::create("test_ns".to_string(), schema, storage, None)
+            .await
+            .unwrap();
+
+        // Add documents with different titles
+        let mut attrs1 = HashMap::new();
+        attrs1.insert(
+            "title".to_string(),
+            AttributeValue::String("Rust programming language".to_string()),
+        );
+
+        let mut attrs2 = HashMap::new();
+        attrs2.insert(
+            "title".to_string(),
+            AttributeValue::String("Rust vector database".to_string()),
+        );
+
+        let mut attrs3 = HashMap::new();
+        attrs3.insert(
+            "title".to_string(),
+            AttributeValue::String("Python programming tutorial".to_string()),
+        );
+
+        let docs = vec![
+            Document {
+                id: 1,
+                vector: Some(vec![1.0; 64]),
+                attributes: attrs1,
+            },
+            Document {
+                id: 2,
+                vector: Some(vec![2.0; 64]),
+                attributes: attrs2,
+            },
+            Document {
+                id: 3,
+                vector: Some(vec![3.0; 64]),
+                attributes: attrs3,
+            },
+        ];
+
+        ns.upsert(docs).await.unwrap();
+
+        // Full-text search for "rust"
+        let ft_query = crate::query::FullTextQuery {
+            field: "title".to_string(),
+            query: "rust".to_string(),
+            weight: 1.0,
+        };
+
+        let results = ns.query(None, Some(&ft_query), 10, None).await.unwrap();
+
+        // Should return docs 1 and 2 (both contain "rust")
+        assert_eq!(results.len(), 2);
+        let ids: Vec<u64> = results.iter().map(|(doc, _)| doc.id).collect();
+        assert!(ids.contains(&1));
+        assert!(ids.contains(&2));
+        assert!(!ids.contains(&3));
+    }
+
+    #[tokio::test]
+    async fn test_namespace_hybrid_search() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
+
+        let mut attributes = HashMap::new();
+        attributes.insert(
+            "content".to_string(),
+            AttributeSchema {
+                attr_type: AttributeType::String,
+                indexed: false,
+                full_text: true,
+            },
+        );
+
+        let schema = Schema {
+            vector_dim: 64,
+            vector_metric: DistanceMetric::Cosine,
+            attributes,
+        };
+
+        let ns = Namespace::create("test_ns".to_string(), schema, storage, None)
+            .await
+            .unwrap();
+
+        // Add documents
+        let mut attrs1 = HashMap::new();
+        attrs1.insert(
+            "content".to_string(),
+            AttributeValue::String("machine learning algorithms".to_string()),
+        );
+
+        let mut attrs2 = HashMap::new();
+        attrs2.insert(
+            "content".to_string(),
+            AttributeValue::String("deep learning neural networks".to_string()),
+        );
+
+        let mut attrs3 = HashMap::new();
+        attrs3.insert(
+            "content".to_string(),
+            AttributeValue::String("database systems".to_string()),
+        );
+
+        let docs = vec![
+            Document {
+                id: 1,
+                vector: Some(vec![1.0; 64]),
+                attributes: attrs1,
+            },
+            Document {
+                id: 2,
+                vector: Some(vec![0.9; 64]),
+                attributes: attrs2,
+            },
+            Document {
+                id: 3,
+                vector: Some(vec![5.0; 64]),
+                attributes: attrs3,
+            },
+        ];
+
+        ns.upsert(docs).await.unwrap();
+
+        // Hybrid search: vector + full-text
+        let query_vector = vec![1.0; 64];
+        let ft_query = crate::query::FullTextQuery {
+            field: "content".to_string(),
+            query: "learning".to_string(),
+            weight: 0.5,
+        };
+
+        let results = ns
+            .query(Some(&query_vector), Some(&ft_query), 10, None)
+            .await
+            .unwrap();
+
+        // Should return docs that match vector similarity OR text relevance
+        assert!(results.len() >= 2);
+
+        // Docs 1 and 2 should be in results (similar vectors + contain "learning")
+        let ids: Vec<u64> = results.iter().map(|(doc, _)| doc.id).collect();
+        assert!(ids.contains(&1) || ids.contains(&2));
     }
 }

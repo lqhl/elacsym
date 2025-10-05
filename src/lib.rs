@@ -17,5 +17,6 @@ pub mod query;
 pub mod segment;
 pub mod storage;
 pub mod types;
+pub mod wal;
 
 pub use error::{Error, Result};
