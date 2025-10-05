@@ -25,6 +25,13 @@ disk_path = "./cache"
 # Default distance metric: "cosine", "l2", or "dot"
 default_metric = "cosine"
 
+[compaction]
+# Background compaction settings
+enabled = true
+interval_secs = 3600  # Check every 1 hour
+max_segments = 100    # Trigger when segment count exceeds this
+max_total_docs = 1000000  # Trigger when total docs exceed this (~ 1GB)
+
 [logging]
 level = "info"
 format = "json"  # "json" or "text"

@@ -6,6 +6,8 @@
 //! - Vector Index (RaBitQ)
 //! - Segments (Parquet files)
 
+pub mod compaction;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -19,6 +21,8 @@ use crate::storage::StorageBackend;
 use crate::types::{AttributeValue, Document, FullTextConfig, Schema, SegmentInfo};
 use crate::wal::{WalManager, WalOperation};
 use crate::{Error, Result};
+
+pub use compaction::{CompactionConfig, CompactionManager};
 
 /// Namespace represents a collection of documents with a shared schema
 pub struct Namespace {
@@ -515,22 +519,28 @@ impl Namespace {
         )
     }
 
-    /// Check if compaction is needed
+    /// Check if compaction is needed (using default config)
     ///
     /// Compaction is triggered when:
     /// - Number of segments > 100, OR
     /// - Total segment size > 1GB
     pub async fn should_compact(&self) -> bool {
+        let config = CompactionConfig::default();
+        self.should_compact_with_config(&config).await
+    }
+
+    /// Check if compaction is needed with custom config
+    pub async fn should_compact_with_config(&self, config: &CompactionConfig) -> bool {
         let manifest = self.manifest.read().await;
 
         // Trigger if too many segments
-        if manifest.segments.len() > 100 {
+        if manifest.segments.len() > config.max_segments {
             return true;
         }
 
-        // Trigger if total size exceeds threshold (1GB)
-        let total_size: usize = manifest.segments.iter().map(|s| s.row_count).sum();
-        total_size > 1_000_000 // 1M documents ~= 1GB with average doc size
+        // Trigger if total size exceeds threshold
+        let total_docs: usize = manifest.segments.iter().map(|s| s.row_count).sum();
+        total_docs > config.max_total_docs
     }
 
     /// Perform compaction to merge small segments
@@ -713,6 +723,8 @@ pub struct NamespaceManager {
     storage: Arc<dyn StorageBackend>,
     cache: Option<Arc<CacheManager>>,
     namespaces: Arc<RwLock<HashMap<String, Arc<Namespace>>>>,
+    compaction_config: CompactionConfig,
+    compaction_managers: Arc<RwLock<HashMap<String, Arc<CompactionManager>>>>,
 }
 
 impl NamespaceManager {
@@ -721,6 +733,8 @@ impl NamespaceManager {
             storage,
             cache: None,
             namespaces: Arc::new(RwLock::new(HashMap::new())),
+            compaction_config: CompactionConfig::default(),
+            compaction_managers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -730,6 +744,23 @@ impl NamespaceManager {
             storage,
             cache: Some(cache),
             namespaces: Arc::new(RwLock::new(HashMap::new())),
+            compaction_config: CompactionConfig::default(),
+            compaction_managers: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Create a new NamespaceManager with custom compaction config
+    pub fn with_compaction_config(
+        storage: Arc<dyn StorageBackend>,
+        cache: Option<Arc<CacheManager>>,
+        compaction_config: CompactionConfig,
+    ) -> Self {
+        Self {
+            storage,
+            cache,
+            namespaces: Arc::new(RwLock::new(HashMap::new())),
+            compaction_config,
+            compaction_managers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -757,9 +788,21 @@ impl NamespaceManager {
             .await?,
         );
 
-        // Store in cache
-        let mut namespaces = self.namespaces.write().await;
-        namespaces.insert(name, namespace.clone());
+        // Start compaction manager for this namespace
+        let compaction_manager = Arc::new(CompactionManager::new(self.compaction_config.clone()));
+        compaction_manager
+            .start_for_namespace(namespace.clone())
+            .await?;
+
+        // Store in caches
+        {
+            let mut namespaces = self.namespaces.write().await;
+            namespaces.insert(name.clone(), namespace.clone());
+        }
+        {
+            let mut managers = self.compaction_managers.write().await;
+            managers.insert(name, compaction_manager);
+        }
 
         Ok(namespace)
     }
@@ -779,9 +822,21 @@ impl NamespaceManager {
             Namespace::load(name.to_string(), self.storage.clone(), self.cache.clone()).await?,
         );
 
-        // Store in cache
-        let mut namespaces = self.namespaces.write().await;
-        namespaces.insert(name.to_string(), namespace.clone());
+        // Start compaction manager for this namespace (if not already started)
+        let compaction_manager = Arc::new(CompactionManager::new(self.compaction_config.clone()));
+        compaction_manager
+            .start_for_namespace(namespace.clone())
+            .await?;
+
+        // Store in caches
+        {
+            let mut namespaces = self.namespaces.write().await;
+            namespaces.insert(name.to_string(), namespace.clone());
+        }
+        {
+            let mut managers = self.compaction_managers.write().await;
+            managers.insert(name.to_string(), compaction_manager);
+        }
 
         Ok(namespace)
     }
