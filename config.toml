@@ -1,0 +1,30 @@
+# Elacsym Configuration
+
+[server]
+host = "0.0.0.0"
+port = 3000
+
+[storage]
+# Storage backend: "s3" or "local"
+backend = "local"
+
+[storage.local]
+root_path = "./data"
+
+# [storage.s3]
+# bucket = "elacsym-data"
+# region = "us-west-2"
+# endpoint = "http://localhost:9000"  # For MinIO
+
+[cache]
+memory_size = 4294967296  # 4GB
+disk_size = 107374182400  # 100GB
+disk_path = "./cache"
+
+[index]
+# Default distance metric: "cosine", "l2", or "dot"
+default_metric = "cosine"
+
+[logging]
+level = "info"
+format = "json"  # "json" or "text"

@@ -1,0 +1,69 @@
+[package]
+name = "elacsym"
+version = "0.1.0"
+edition = "2021"
+authors = ["elacsym contributors"]
+license = "Apache-2.0"
+description = "An open-source vector database built on object storage"
+repository = "https://github.com/yourusername/elacsym"
+
+[workspace]
+members = ["."]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.41", features = ["full"] }
+async-trait = "0.1"
+
+# HTTP framework
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Storage
+aws-sdk-s3 = "1.59"
+aws-config = "1.5"
+aws-credential-types = "1.2"
+
+# Arrow & Parquet
+arrow = "53.3"
+parquet = { version = "53.3", features = ["async"] }
+
+# Vector index
+rabitq = "0.2"
+
+# Cache
+foyer = "0.12"
+
+# Full-text search
+tantivy = "0.22"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Utilities
+bytes = "1.8"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6.1"
+fastrand = "2.3"
+
+# Configuration
+config = "0.14"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+tempfile = "3.14"
+
+[[bench]]
+name = "vector_search"
+harness = false
