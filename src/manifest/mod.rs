@@ -101,51 +101,124 @@ impl ManifestManager {
         Self { storage }
     }
 
-    /// Get manifest key for a namespace
-    fn manifest_key(namespace: &str) -> String {
+    /// Get versioned manifest key
+    fn versioned_manifest_key(namespace: &str, version: u64) -> String {
+        format!("{}/manifests/v{:08}.json", namespace, version)
+    }
+
+    /// Get current version pointer key
+    fn current_version_key(namespace: &str) -> String {
+        format!("{}/manifests/current.txt", namespace)
+    }
+
+    /// Legacy manifest key (for backward compatibility)
+    fn legacy_manifest_key(namespace: &str) -> String {
         format!("{}/manifest.json", namespace)
     }
 
-    /// Load manifest from storage
-    pub async fn load(&self, namespace: &str) -> Result<Manifest> {
-        let key = Self::manifest_key(namespace);
+    /// Read current version number
+    async fn read_current_version(&self, namespace: &str) -> Result<u64> {
+        let key = Self::current_version_key(namespace);
 
-        let data = self
-            .storage
-            .get(&key)
-            .await
-            .map_err(|_e| Error::NamespaceNotFound(namespace.to_string()))?;
+        match self.storage.get(&key).await {
+            Ok(data) => {
+                let version_str = String::from_utf8(data.to_vec())
+                    .map_err(|e| Error::internal(format!("Invalid UTF-8 in current.txt: {}", e)))?;
 
-        let json = String::from_utf8(data.to_vec())
-            .map_err(|e| Error::internal(format!("Invalid UTF-8 in manifest: {}", e)))?;
-
-        Manifest::from_json(&json)
+                version_str
+                    .trim()
+                    .parse::<u64>()
+                    .map_err(|e| Error::internal(format!("Invalid version number: {}", e)))
+            }
+            Err(_) => {
+                // Try legacy manifest.json
+                if self.storage.exists(&Self::legacy_manifest_key(namespace)).await? {
+                    // Migrate from legacy
+                    tracing::info!("Migrating namespace '{}' to versioned manifests", namespace);
+                    Ok(0) // Will create v1 on next save
+                } else {
+                    Err(Error::NamespaceNotFound(namespace.to_string()))
+                }
+            }
+        }
     }
 
-    /// Save manifest to storage (atomic)
+    /// Load manifest from storage (supports versioned and legacy)
+    pub async fn load(&self, namespace: &str) -> Result<Manifest> {
+        // Try versioned manifest first
+        match self.read_current_version(namespace).await {
+            Ok(version) if version > 0 => {
+                let key = Self::versioned_manifest_key(namespace, version);
+                let data = self.storage.get(&key).await?;
+
+                let json = String::from_utf8(data.to_vec())
+                    .map_err(|e| Error::internal(format!("Invalid UTF-8 in manifest: {}", e)))?;
+
+                Manifest::from_json(&json)
+            }
+            _ => {
+                // Fall back to legacy manifest.json
+                let key = Self::legacy_manifest_key(namespace);
+                let data = self
+                    .storage
+                    .get(&key)
+                    .await
+                    .map_err(|_e| Error::NamespaceNotFound(namespace.to_string()))?;
+
+                let json = String::from_utf8(data.to_vec())
+                    .map_err(|e| Error::internal(format!("Invalid UTF-8 in manifest: {}", e)))?;
+
+                Manifest::from_json(&json)
+            }
+        }
+    }
+
+    /// Save manifest to storage (versioned, optimistic locking)
     pub async fn save(&self, manifest: &Manifest) -> Result<()> {
         let json = manifest.to_json()?;
         let data = Bytes::from(json.into_bytes());
 
-        let key = Self::manifest_key(&manifest.namespace);
+        // Read current version (or 0 if not exists)
+        let current_version = self.read_current_version(&manifest.namespace)
+            .await
+            .unwrap_or(0);
 
-        // Write to temporary location first
-        let temp_key = format!("{}.tmp", key);
-        self.storage.put(&temp_key, data.clone()).await?;
+        // Use manifest version if it's newer (from manifest.version)
+        let new_version = manifest.version.max(current_version + 1);
 
-        // Atomic rename (for S3, this is just overwrite)
-        self.storage.put(&key, data).await?;
+        // 1. Write new versioned manifest
+        let versioned_key = Self::versioned_manifest_key(&manifest.namespace, new_version);
+        self.storage.put(&versioned_key, data.clone()).await?;
 
-        // Clean up temp file
-        let _ = self.storage.delete(&temp_key).await;
+        tracing::debug!(
+            "Wrote manifest version {} for namespace '{}'",
+            new_version,
+            manifest.namespace
+        );
+
+        // 2. Update current.txt pointer (last step, atomic)
+        let current_key = Self::current_version_key(&manifest.namespace);
+        let version_bytes = Bytes::from(new_version.to_string());
+        self.storage.put(&current_key, version_bytes).await?;
+
+        // 3. Also write legacy manifest.json for backward compatibility
+        let legacy_key = Self::legacy_manifest_key(&manifest.namespace);
+        self.storage.put(&legacy_key, data).await?;
 
         Ok(())
     }
 
     /// Check if namespace exists
     pub async fn exists(&self, namespace: &str) -> Result<bool> {
-        let key = Self::manifest_key(namespace);
-        self.storage.exists(&key).await
+        // Check versioned manifest first
+        let current_key = Self::current_version_key(namespace);
+        if self.storage.exists(&current_key).await? {
+            return Ok(true);
+        }
+
+        // Fall back to legacy manifest
+        let legacy_key = Self::legacy_manifest_key(namespace);
+        self.storage.exists(&legacy_key).await
     }
 
     /// Create a new namespace
@@ -166,8 +239,18 @@ impl ManifestManager {
 
     /// Delete a namespace
     pub async fn delete(&self, namespace: &str) -> Result<()> {
-        let key = Self::manifest_key(namespace);
-        self.storage.delete(&key).await
+        // Delete current.txt
+        let current_key = Self::current_version_key(namespace);
+        let _ = self.storage.delete(&current_key).await;
+
+        // Delete legacy manifest
+        let legacy_key = Self::legacy_manifest_key(namespace);
+        let _ = self.storage.delete(&legacy_key).await;
+
+        // Note: Versioned manifests and segments are not deleted here
+        // They should be cleaned up by a separate GC process
+
+        Ok(())
     }
 }
 
