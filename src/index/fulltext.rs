@@ -6,8 +6,7 @@ use bytes::Bytes;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
@@ -310,7 +309,7 @@ impl FullTextIndex {
     /// 4. Uploads to storage
     pub async fn build_and_persist(
         field_name: String,
-        config: FullTextConfig,
+        _config: FullTextConfig,
         documents: &[(DocId, String)],
         storage: Arc<dyn StorageBackend>,
         segment_id: &str,
@@ -397,17 +396,19 @@ impl FullTextIndex {
 /// Compress a directory to .tar.gz format
 fn compress_directory(dir: &Path) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
-    let gz = GzEncoder::new(&mut buf, Compression::default());
-    let mut tar = tar::Builder::new(gz);
+    {
+        let gz = GzEncoder::new(&mut buf, Compression::default());
+        let mut tar = tar::Builder::new(gz);
 
-    // Add all files in directory
-    tar.append_dir_all(".", dir).map_err(|e| {
-        Error::internal(format!("Failed to create tarball: {}", e))
-    })?;
+        // Add all files in directory
+        tar.append_dir_all(".", dir).map_err(|e| {
+            Error::internal(format!("Failed to create tarball: {}", e))
+        })?;
 
-    tar.finish().map_err(|e| {
-        Error::internal(format!("Failed to finish tarball: {}", e))
-    })?;
+        tar.finish().map_err(|e| {
+            Error::internal(format!("Failed to finish tarball: {}", e))
+        })?;
+    } // Drop tar and gz here
 
     Ok(buf)
 }

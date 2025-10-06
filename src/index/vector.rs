@@ -25,10 +25,10 @@ pub struct VectorIndex {
     id_map: HashMap<DocId, usize>,
 
     /// Reverse map from internal index to DocId
-    reverse_map: Vec<DocId>,
+    pub reverse_map: Vec<DocId>,
 
     /// All vectors stored (needed for index rebuilding)
-    vectors: Vec<Vector>,
+    pub vectors: Vec<Vector>,
 
     /// Whether index needs rebuilding
     #[serde(skip)]

@@ -253,6 +253,7 @@ mod tests {
                 assert_eq!(documents.len(), 1);
                 assert_eq!(documents[0].id, 1);
             }
+            _ => panic!("Expected Upsert operation"),
         }
     }
 
@@ -283,6 +284,7 @@ mod tests {
                 WalOperation::Upsert { documents } => {
                     assert_eq!(documents[0].id, i as u64);
                 }
+                _ => panic!("Expected Upsert operation"),
             }
         }
     }

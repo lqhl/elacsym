@@ -69,6 +69,7 @@ config = "0.14"
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
 tempfile = "3.14"
+futures = "0.3"
 
 [[bench]]
 name = "vector_search"

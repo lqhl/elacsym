@@ -1236,7 +1236,7 @@ mod tests {
         };
 
         // Create namespace
-        let ns = Namespace::create("test_ns".to_string(), schema, storage.clone(), None)
+        let ns = Namespace::create("test_ns".to_string(), schema, storage.clone(), None, "test-node".to_string())
             .await
             .unwrap();
 
@@ -1296,7 +1296,7 @@ mod tests {
             attributes,
         };
 
-        let ns = Namespace::create("test_ns".to_string(), schema, storage, None)
+        let ns = Namespace::create("test_ns".to_string(), schema, storage, None, "test-node".to_string())
             .await
             .unwrap();
 
@@ -1390,7 +1390,7 @@ mod tests {
             attributes,
         };
 
-        let ns = Namespace::create("test_ns".to_string(), schema, storage, None)
+        let ns = Namespace::create("test_ns".to_string(), schema, storage, None, "test-node".to_string())
             .await
             .unwrap();
 
@@ -1505,7 +1505,7 @@ mod tests {
             attributes,
         };
 
-        let ns = Namespace::create("test_ns".to_string(), schema, storage, None)
+        let ns = Namespace::create("test_ns".to_string(), schema, storage, None, "test-node".to_string())
             .await
             .unwrap();
 
@@ -1586,7 +1586,7 @@ mod tests {
             attributes,
         };
 
-        let ns = Namespace::create("test_ns".to_string(), schema, storage, None)
+        let ns = Namespace::create("test_ns".to_string(), schema, storage, None, "test-node".to_string())
             .await
             .unwrap();
 

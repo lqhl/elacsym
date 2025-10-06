@@ -21,7 +21,7 @@ async fn test_end_to_end_workflow() {
     let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
 
     // Create namespace manager
-    let manager = Arc::new(NamespaceManager::new(storage));
+    let manager = Arc::new(NamespaceManager::new(storage, "test-node".to_string()));
 
     // Define schema
     let mut attributes = HashMap::new();
@@ -178,7 +178,7 @@ async fn test_wal_recovery() {
     // Phase 1: Create namespace and insert data
     {
         let storage = Arc::new(LocalStorage::new(&storage_path).unwrap());
-        let manager = Arc::new(NamespaceManager::new(storage));
+        let manager = Arc::new(NamespaceManager::new(storage, "test-node".to_string()));
 
         let schema = Schema {
             vector_dim: 64,
@@ -212,7 +212,7 @@ async fn test_wal_recovery() {
     // Phase 2: Reload namespace - WAL should be replayed
     {
         let storage = Arc::new(LocalStorage::new(&storage_path).unwrap());
-        let manager = Arc::new(NamespaceManager::new(storage));
+        let manager = Arc::new(NamespaceManager::new(storage, "test-node".to_string()));
 
         let namespace = manager.get_namespace("test").await.unwrap();
 
@@ -242,7 +242,7 @@ async fn test_with_cache() {
     };
 
     let cache = Arc::new(CacheManager::new(cache_config).await.unwrap());
-    let manager = Arc::new(NamespaceManager::with_cache(storage, cache));
+    let manager = Arc::new(NamespaceManager::with_cache(storage, cache, "test-node".to_string()));
 
     let schema = Schema {
         vector_dim: 64,
@@ -294,6 +294,7 @@ async fn test_compaction() {
         storage,
         None,
         compaction_config,
+        "test-node".to_string(),
     ));
 
     let schema = Schema {
@@ -346,7 +347,7 @@ async fn test_namespace_persistence() {
     // Phase 1: Create and populate
     {
         let storage = Arc::new(LocalStorage::new(&storage_path).unwrap());
-        let manager = Arc::new(NamespaceManager::new(storage));
+        let manager = Arc::new(NamespaceManager::new(storage, "test-node".to_string()));
 
         let mut attributes = HashMap::new();
         attributes.insert(
@@ -385,7 +386,7 @@ async fn test_namespace_persistence() {
     // Phase 2: Reload and verify
     {
         let storage = Arc::new(LocalStorage::new(&storage_path).unwrap());
-        let manager = Arc::new(NamespaceManager::new(storage));
+        let manager = Arc::new(NamespaceManager::new(storage, "test-node".to_string()));
 
         let namespace = manager.get_namespace("persistent").await.unwrap();
 
@@ -411,7 +412,7 @@ async fn test_namespace_persistence() {
 async fn test_multi_field_fulltext() {
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
-    let manager = Arc::new(NamespaceManager::new(storage));
+    let manager = Arc::new(NamespaceManager::new(storage, "test-node".to_string()));
 
     let mut attributes = HashMap::new();
     attributes.insert(

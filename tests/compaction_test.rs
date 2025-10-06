@@ -35,6 +35,7 @@ async fn test_compaction_merges_segments() {
         schema.clone(),
         storage.clone(),
         None,
+        "test-node".to_string(),
     )
     .await
     .unwrap();
@@ -146,6 +147,7 @@ async fn test_compaction_with_full_text_index() {
         schema,
         storage,
         None,
+        "test-node".to_string(),
     )
     .await
     .unwrap();
@@ -229,7 +231,7 @@ async fn test_should_compact_threshold() {
 
     // Create namespace
     let storage = Arc::new(LocalStorage::new(storage_path).unwrap());
-    let namespace = Namespace::create("test_threshold".to_string(), schema, storage, None)
+    let namespace = Namespace::create("test_threshold".to_string(), schema, storage, None, "test-node".to_string())
         .await
         .unwrap();
 

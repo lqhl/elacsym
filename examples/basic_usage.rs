@@ -53,7 +53,7 @@ async fn main() -> elacsym::Result<()> {
 
     // 3. Create namespace
     println!("Creating namespace 'my_docs'...");
-    let namespace = Namespace::create("my_docs".to_string(), schema, storage.clone(), None).await?;
+    let namespace = Namespace::create("my_docs".to_string(), schema, storage.clone(), None, "main-node".to_string()).await?;
     println!("✓ Namespace created\n");
 
     // 4. Insert documents

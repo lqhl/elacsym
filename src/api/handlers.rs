@@ -2,22 +2,23 @@
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::time::Instant;
 
-use crate::namespace::NamespaceManager;
+use crate::api::AppState;
 use crate::query::{QueryRequest, QueryResponse, QueryResult};
 use crate::types::{Document, Schema};
 
 /// Health check with system status
 pub async fn health(
-    State(manager): State<Arc<NamespaceManager>>,
+    State(state): State<AppState>,
 ) -> Result<Json<HealthResponse>, (StatusCode, String)> {
-    let namespaces = manager
+    let namespaces = state
+        .manager
         .list_namespaces()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -25,6 +26,7 @@ pub async fn health(
     Ok(Json(HealthResponse {
         status: "healthy".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        node_id: state.node_id().to_string(),
         namespaces: namespaces.len(),
     }))
 }
@@ -33,16 +35,42 @@ pub async fn health(
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    pub node_id: String,
     pub namespaces: usize,
 }
 
 /// Create or update namespace
 pub async fn create_namespace(
-    State(manager): State<Arc<NamespaceManager>>,
+    State(state): State<AppState>,
     Path(namespace): Path<String>,
     Json(payload): Json<CreateNamespaceRequest>,
-) -> Result<Json<CreateNamespaceResponse>, (StatusCode, String)> {
-    manager
+) -> Result<Response, (StatusCode, String)> {
+    // Check if this node should handle this namespace (for indexer nodes)
+    if !state.should_handle(&namespace) {
+        let responsible_node = state
+            .get_responsible_node_id(&namespace)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        tracing::warn!(
+            "Namespace '{}' should be handled by node '{}', not this node ('{}')",
+            namespace,
+            responsible_node,
+            state.node_id()
+        );
+
+        // Return 307 Temporary Redirect
+        return Ok((
+            StatusCode::TEMPORARY_REDIRECT,
+            [
+                (header::LOCATION, format!("/v1/namespaces/{}", namespace)),
+                ("X-Correct-Indexer".parse().unwrap(), responsible_node),
+            ],
+        )
+            .into_response());
+    }
+
+    state
+        .manager
         .create_namespace(namespace.clone(), payload.schema)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -50,7 +78,8 @@ pub async fn create_namespace(
     Ok(Json(CreateNamespaceResponse {
         namespace,
         created: true,
-    }))
+    })
+    .into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -66,11 +95,38 @@ pub struct CreateNamespaceResponse {
 
 /// Upsert documents
 pub async fn upsert(
-    State(manager): State<Arc<NamespaceManager>>,
+    State(state): State<AppState>,
     Path(namespace): Path<String>,
     Json(payload): Json<UpsertRequest>,
-) -> Result<Json<UpsertResponse>, (StatusCode, String)> {
-    let ns = manager
+) -> Result<Response, (StatusCode, String)> {
+    // Check if this node should handle this namespace (for indexer nodes)
+    if !state.should_handle(&namespace) {
+        let responsible_node = state
+            .get_responsible_node_id(&namespace)
+            .unwrap_or_else(|| "unknown".to_string());
+
+        tracing::warn!(
+            "Namespace '{}' should be handled by node '{}', redirecting",
+            namespace,
+            responsible_node
+        );
+
+        // Return 307 Temporary Redirect
+        return Ok((
+            StatusCode::TEMPORARY_REDIRECT,
+            [
+                (
+                    header::LOCATION,
+                    format!("/v1/namespaces/{}/upsert", namespace),
+                ),
+                ("X-Correct-Indexer".parse().unwrap(), responsible_node),
+            ],
+        )
+            .into_response());
+    }
+
+    let ns = state
+        .manager
         .get_namespace(&namespace)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
@@ -80,7 +136,7 @@ pub async fn upsert(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    Ok(Json(UpsertResponse { count }))
+    Ok(Json(UpsertResponse { count }).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,14 +150,17 @@ pub struct UpsertResponse {
 }
 
 /// Query documents
+///
+/// Query nodes can handle any namespace (no redirect needed)
 pub async fn query(
-    State(manager): State<Arc<NamespaceManager>>,
+    State(state): State<AppState>,
     Path(namespace): Path<String>,
     Json(payload): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, (StatusCode, String)> {
     let start = Instant::now();
 
-    let ns = manager
+    let ns = state
+        .manager
         .get_namespace(&namespace)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;

@@ -245,7 +245,7 @@ mod tests {
         };
 
         let namespace = Arc::new(
-            Namespace::create("test_ns".to_string(), schema, storage, None)
+            Namespace::create("test_ns".to_string(), schema, storage, None, "test-node".to_string())
                 .await
                 .unwrap(),
         );
@@ -287,7 +287,7 @@ mod tests {
         };
 
         let namespace = Arc::new(
-            Namespace::create("test_ns".to_string(), schema, storage, None)
+            Namespace::create("test_ns".to_string(), schema, storage, None, "test-node".to_string())
                 .await
                 .unwrap(),
         );
@@ -353,7 +353,7 @@ mod tests {
         };
 
         let namespace = Arc::new(
-            Namespace::create("test_ns".to_string(), schema, storage, None)
+            Namespace::create("test_ns".to_string(), schema, storage, None, "test-node".to_string())
                 .await
                 .unwrap(),
         );

@@ -64,6 +64,7 @@ async fn test_wal_recovery_after_crash() {
         schema.clone(),
         storage.clone(),
         None,
+        "test-node".to_string(),
     )
     .await
     .unwrap();
@@ -93,7 +94,7 @@ async fn test_wal_recovery_after_crash() {
 
     // Step 2: Reload namespace - WAL should be replayed
     let storage2 = Arc::new(LocalStorage::new(storage_path).unwrap());
-    let namespace2 = Namespace::load(namespace_name, storage2, None)
+    let namespace2 = Namespace::load(namespace_name, storage2, None, "test-node".to_string())
         .await
         .unwrap();
 
@@ -135,7 +136,7 @@ async fn test_wal_empty_after_successful_upsert() {
 
     // Create namespace
     let storage = Arc::new(LocalStorage::new(storage_path.clone()).unwrap());
-    let namespace = Namespace::create("test_wal_truncate".to_string(), schema, storage, None)
+    let namespace = Namespace::create("test_wal_truncate".to_string(), schema, storage, None, "test-node".to_string())
         .await
         .unwrap();
 
