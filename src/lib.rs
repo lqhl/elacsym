@@ -15,6 +15,7 @@ pub mod manifest;
 pub mod namespace;
 pub mod query;
 pub mod segment;
+pub mod sharding;
 pub mod storage;
 pub mod types;
 pub mod wal;

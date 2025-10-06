@@ -27,6 +27,7 @@ pub use compaction::{CompactionConfig, CompactionManager};
 /// Namespace represents a collection of documents with a shared schema
 pub struct Namespace {
     name: String,
+    node_id: String,  // Node ID for WAL file naming
     storage: Arc<dyn StorageBackend>,
     cache: Option<Arc<CacheManager>>,
     manifest_manager: ManifestManager,
@@ -41,6 +42,7 @@ pub struct Namespace {
     fulltext_indexes: Arc<RwLock<HashMap<String, FullTextIndex>>>,
 
     /// Write-Ahead Log for durability (protected by RwLock)
+    /// Uses local WAL for now, will be replaced with S3WalManager
     wal: Arc<RwLock<WalManager>>,
 }
 
@@ -51,6 +53,7 @@ impl Namespace {
         schema: Schema,
         storage: Arc<dyn StorageBackend>,
         cache: Option<Arc<CacheManager>>,
+        node_id: String,
     ) -> Result<Self> {
         let manifest_manager = ManifestManager::new(storage.clone());
 
@@ -80,6 +83,7 @@ impl Namespace {
 
         Ok(Self {
             name,
+            node_id,
             storage,
             cache,
             manifest_manager,
@@ -95,6 +99,7 @@ impl Namespace {
         name: String,
         storage: Arc<dyn StorageBackend>,
         cache: Option<Arc<CacheManager>>,
+        node_id: String,
     ) -> Result<Self> {
         let manifest_manager = ManifestManager::new(storage.clone());
 
@@ -124,6 +129,7 @@ impl Namespace {
         // Create the namespace instance first
         let namespace = Self {
             name: name.clone(),
+            node_id,
             storage,
             cache,
             manifest_manager,
@@ -1040,27 +1046,34 @@ pub struct NamespaceManager {
     namespaces: Arc<RwLock<HashMap<String, Arc<Namespace>>>>,
     compaction_config: CompactionConfig,
     compaction_managers: Arc<RwLock<HashMap<String, Arc<CompactionManager>>>>,
+    node_id: String,  // Node ID for this manager
 }
 
 impl NamespaceManager {
-    pub fn new(storage: Arc<dyn StorageBackend>) -> Self {
+    pub fn new(storage: Arc<dyn StorageBackend>, node_id: String) -> Self {
         Self {
             storage,
             cache: None,
             namespaces: Arc::new(RwLock::new(HashMap::new())),
             compaction_config: CompactionConfig::default(),
             compaction_managers: Arc::new(RwLock::new(HashMap::new())),
+            node_id,
         }
     }
 
     /// Create a new NamespaceManager with cache
-    pub fn with_cache(storage: Arc<dyn StorageBackend>, cache: Arc<CacheManager>) -> Self {
+    pub fn with_cache(
+        storage: Arc<dyn StorageBackend>,
+        cache: Arc<CacheManager>,
+        node_id: String,
+    ) -> Self {
         Self {
             storage,
             cache: Some(cache),
             namespaces: Arc::new(RwLock::new(HashMap::new())),
             compaction_config: CompactionConfig::default(),
             compaction_managers: Arc::new(RwLock::new(HashMap::new())),
+            node_id,
         }
     }
 
@@ -1069,6 +1082,7 @@ impl NamespaceManager {
         storage: Arc<dyn StorageBackend>,
         cache: Option<Arc<CacheManager>>,
         compaction_config: CompactionConfig,
+        node_id: String,
     ) -> Self {
         Self {
             storage,
@@ -1076,7 +1090,13 @@ impl NamespaceManager {
             namespaces: Arc::new(RwLock::new(HashMap::new())),
             compaction_config,
             compaction_managers: Arc::new(RwLock::new(HashMap::new())),
+            node_id,
         }
+    }
+
+    /// Get the node ID
+    pub fn node_id(&self) -> &str {
+        &self.node_id
     }
 
     /// Create a new namespace
@@ -1099,6 +1119,7 @@ impl NamespaceManager {
                 schema,
                 self.storage.clone(),
                 self.cache.clone(),
+                self.node_id.clone(),
             )
             .await?,
         );
@@ -1134,7 +1155,13 @@ impl NamespaceManager {
 
         // Try to load from storage
         let namespace = Arc::new(
-            Namespace::load(name.to_string(), self.storage.clone(), self.cache.clone()).await?,
+            Namespace::load(
+                name.to_string(),
+                self.storage.clone(),
+                self.cache.clone(),
+                self.node_id.clone(),
+            )
+            .await?,
         );
 
         // Start compaction manager for this namespace (if not already started)

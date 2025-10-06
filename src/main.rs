@@ -58,11 +58,21 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Get node ID from environment or use hostname
+    let node_id = env::var("ELACSYM_NODE_ID").unwrap_or_else(|_| {
+        hostname::get()
+            .ok()
+            .and_then(|h| h.into_string().ok())
+            .unwrap_or_else(|| "elacsym-node".to_string())
+    });
+
+    tracing::info!("Node ID: {}", node_id);
+
     // Create namespace manager
     let manager = if let Some(cache) = cache {
-        Arc::new(NamespaceManager::with_cache(storage, cache))
+        Arc::new(NamespaceManager::with_cache(storage, cache, node_id))
     } else {
-        Arc::new(NamespaceManager::new(storage))
+        Arc::new(NamespaceManager::new(storage, node_id))
     };
 
     // Create API router

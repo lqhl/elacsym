@@ -60,6 +60,8 @@ dashmap = "6.1"
 fastrand = "2.3"
 tar = "0.4"  # For compressing Tantivy indexes
 flate2 = "1.0"  # gzip compression
+seahash = "4.1"  # Fast hash function for consistent hashing
+hostname = "0.4"  # Get system hostname
 
 # Configuration
 config = "0.14"
