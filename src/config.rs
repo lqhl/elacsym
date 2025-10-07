@@ -1,14 +1,17 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::namespace::WalConfig;
 use crate::storage::StorageConfig;
 
+const DEFAULT_CACHE_MEMORY_BYTES: usize = 4 * 1024 * 1024 * 1024; // 4 GiB
+const DEFAULT_CACHE_DISK_BYTES: usize = 100 * 1024 * 1024 * 1024; // 100 GiB
+
 /// Top-level application configuration loaded from file + environment.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct AppConfig {
     pub server: ServerConfig,
@@ -59,25 +62,24 @@ impl AppConfig {
             }
         }
 
+        if config.logging.level.trim().is_empty() {
+            config.logging.level = "info".to_string();
+        }
+
         Ok(config)
     }
 
     /// Resolve storage configuration and associated WAL configuration.
     pub fn storage_runtime(&self) -> Result<(StorageConfig, WalConfig)> {
-        self.storage.to_runtime()
-    }
-}
+        let (storage_config, wal_config) = self.storage.to_runtime()?;
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            storage: StorageSection::default(),
-            cache: CacheSection::default(),
-            compaction: CompactionSection::default(),
-            logging: LoggingSection::default(),
-            distributed: None,
+        if let Some(dist) = &self.distributed {
+            if dist.enabled && !matches!(self.storage.backend, StorageBackendKind::S3) {
+                bail!("Distributed mode requires S3 storage backend");
+            }
         }
+
+        Ok((storage_config, wal_config))
     }
 }
 
@@ -125,10 +127,10 @@ impl StorageSection {
                     .context("storage.s3 configuration required when backend is 's3'")?;
 
                 if s3.bucket.trim().is_empty() {
-                    anyhow::bail!("storage.s3.bucket must be specified");
+                    bail!("storage.s3.bucket must be specified");
                 }
                 if s3.region.trim().is_empty() {
-                    anyhow::bail!("storage.s3.region must be specified");
+                    bail!("storage.s3.region must be specified");
                 }
 
                 let storage_config = StorageConfig::S3 {
@@ -136,7 +138,17 @@ impl StorageSection {
                     region: s3.region,
                     endpoint: s3.endpoint,
                 };
-                Ok((storage_config, WalConfig::s3()))
+                Ok((
+                    storage_config,
+                    WalConfig::s3(s3.wal_prefix.and_then(|p| {
+                        let trimmed = p.trim();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed.to_string())
+                        }
+                    })),
+                ))
             }
         }
     }
@@ -152,17 +164,12 @@ impl Default for StorageSection {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum StorageBackendKind {
+    #[default]
     Local,
     S3,
-}
-
-impl Default for StorageBackendKind {
-    fn default() -> Self {
-        StorageBackendKind::Local
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -179,22 +186,13 @@ impl Default for LocalStorageSection {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct S3StorageSection {
     pub bucket: String,
     pub region: String,
     pub endpoint: Option<String>,
-}
-
-impl Default for S3StorageSection {
-    fn default() -> Self {
-        Self {
-            bucket: String::new(),
-            region: String::new(),
-            endpoint: None,
-        }
-    }
+    pub wal_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -208,8 +206,8 @@ pub struct CacheSection {
 impl Default for CacheSection {
     fn default() -> Self {
         Self {
-            memory_size: 4 * 1024 * 1024 * 1024,
-            disk_size: 100 * 1024 * 1024 * 1024,
+            memory_size: DEFAULT_CACHE_MEMORY_BYTES,
+            disk_size: DEFAULT_CACHE_DISK_BYTES,
             disk_path: "./cache".to_string(),
         }
     }
@@ -235,36 +233,22 @@ impl Default for CompactionSection {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct LoggingSection {
     pub level: String,
     pub format: LogFormat,
 }
 
-impl Default for LoggingSection {
-    fn default() -> Self {
-        Self {
-            level: "info".to_string(),
-            format: LogFormat::Json,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum LogFormat {
+    #[default]
     Json,
     Text,
 }
 
-impl Default for LogFormat {
-    fn default() -> Self {
-        LogFormat::Json
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct DistributedSection {
     pub enabled: bool,
@@ -274,18 +258,7 @@ pub struct DistributedSection {
     pub indexer: Option<IndexerClusterSection>,
 }
 
-impl Default for DistributedSection {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            node_id: None,
-            role: None,
-            indexer: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DistributedRole {
     Indexer,
@@ -304,14 +277,8 @@ impl std::str::FromStr for DistributedRole {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct IndexerClusterSection {
     pub nodes: Vec<String>,
-}
-
-impl Default for IndexerClusterSection {
-    fn default() -> Self {
-        Self { nodes: Vec::new() }
-    }
 }

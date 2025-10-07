@@ -52,7 +52,6 @@ pub struct WalEntry {
 /// - Length: u32 (4 bytes) - length of serialized entry
 /// - Data: serialized WalEntry (msgpack)
 /// - CRC32: u32 (4 bytes) - checksum of length + data
-
 const WAL_MAGIC: &[u8; 4] = b"EWAL";
 const WAL_VERSION: u32 = 1;
 

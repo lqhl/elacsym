@@ -122,7 +122,7 @@ async fn test_wal_recovery_after_crash() {
 
     // Should find at least document 1
     assert!(
-        results.len() >= 1,
+        !results.is_empty(),
         "Expected at least 1 result after WAL recovery, got {}",
         results.len()
     );

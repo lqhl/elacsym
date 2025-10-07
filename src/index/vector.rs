@@ -113,7 +113,7 @@ impl VectorIndex {
 
         // Generate centroids using simple k-means
         let k = (self.vectors.len() as f32).sqrt() as usize;
-        let k = k.max(1).min(256); // Limit centroids between 1 and 256
+        let k = k.clamp(1, 256); // Limit centroids between 1 and 256
         let centroids = self.generate_centroids(k, padded_dim)?;
         self.write_fvecs(&centroid_path, &centroids, padded_dim)?;
 
@@ -161,7 +161,7 @@ impl VectorIndex {
 
         // Query parameters
         let probe = (self.vectors.len() as f32).sqrt() as usize;
-        let probe = probe.max(1).min(256);
+        let probe = probe.clamp(1, 256);
 
         // RaBitQ search returns Vec<(distance, internal_id)>
         let results = index.query(&padded_query, probe, top_k * 2, true);

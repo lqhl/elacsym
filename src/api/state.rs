@@ -76,6 +76,8 @@ impl AppState {
 /// Role of a node in the cluster.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeRole {
+    /// Indexer nodes own namespaces and handle write operations.
     Indexer,
+    /// Query nodes forward reads to indexers and never mutate storage locally.
     Query,
 }

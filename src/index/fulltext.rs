@@ -504,7 +504,7 @@ mod tests {
         let results = index.search("rust programming", 10).unwrap();
 
         // Should return all docs with "rust" or "programming"
-        assert!(results.len() >= 1);
+        assert!(!results.is_empty());
 
         // Doc 1 should have highest score (contains both terms)
         assert_eq!(results[0].0, 1);

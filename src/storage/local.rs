@@ -65,12 +65,22 @@ impl StorageBackend for LocalStorage {
             return Ok(results);
         }
 
-        let mut entries = fs::read_dir(&prefix_path).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if let Ok(relative) = path.strip_prefix(&self.root_path) {
-                if let Some(s) = relative.to_str() {
-                    results.push(s.to_string());
+        let mut stack = vec![prefix_path];
+
+        while let Some(path) = stack.pop() {
+            let mut entries = fs::read_dir(&path).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let entry_path = entry.path();
+                let file_type = entry.file_type().await?;
+                if file_type.is_dir() {
+                    stack.push(entry_path);
+                    continue;
+                }
+
+                if let Ok(relative) = entry_path.strip_prefix(&self.root_path) {
+                    if let Some(s) = relative.to_str() {
+                        results.push(s.to_string());
+                    }
                 }
             }
         }

@@ -5,7 +5,7 @@
 //!
 //! ## Key Design Points:
 //! 1. Each WAL entry is a separate object in S3
-//! 2. File naming: `{namespace}/wal/{timestamp}_{node_id}.log`
+//! 2. File naming: `[{prefix}/]wal/{namespace}/{node_id}/{timestamp}_seq{n}.log`
 //! 3. No file locking needed - S3 PUT is atomic
 //! 4. Multiple indexers can write to different namespaces concurrently
 
@@ -33,6 +33,9 @@ pub struct S3WalManager {
 
     /// Sequence number for this node (monotonic)
     sequence: AtomicU64,
+
+    /// Optional key prefix for multi-tenant buckets
+    prefix: Option<String>,
 }
 
 impl S3WalManager {
@@ -42,13 +45,40 @@ impl S3WalManager {
     /// * `namespace` - Namespace name
     /// * `node_id` - Unique identifier for this node
     /// * `storage` - Storage backend
-    pub fn new(namespace: String, node_id: String, storage: Arc<dyn StorageBackend>) -> Self {
+    pub fn new(
+        namespace: String,
+        node_id: String,
+        storage: Arc<dyn StorageBackend>,
+        prefix: Option<String>,
+    ) -> Self {
         Self {
             namespace,
             node_id,
             storage,
             sequence: AtomicU64::new(0),
+            prefix,
         }
+    }
+
+    fn namespace_prefix(&self) -> String {
+        match self
+            .prefix
+            .as_ref()
+            .map(|p| p.trim_matches('/'))
+            .filter(|p| !p.is_empty())
+        {
+            Some(prefix) => format!("{}/wal/{}/", prefix, self.namespace),
+            None => format!("wal/{}/", self.namespace),
+        }
+    }
+
+    fn wal_directory(&self) -> String {
+        format!("{}{}{}", self.namespace_prefix(), self.node_id, "/")
+    }
+
+    fn wal_key(&self, seq: u64, timestamp: i64) -> String {
+        let base_dir = self.wal_directory();
+        format!("{}{:020}_seq{:06}.log", base_dir, timestamp, seq)
     }
 
     /// Append an operation to the WAL
@@ -71,13 +101,10 @@ impl S3WalManager {
         // 3. Generate unique key
         let seq = self.sequence.fetch_add(1, Ordering::SeqCst);
         let timestamp = chrono::Utc::now().timestamp_millis();
-        let key = format!(
-            "{}/wal/{:020}_{}_seq{:06}.log",
-            self.namespace, timestamp, self.node_id, seq
-        );
+        let key = self.wal_key(seq, timestamp);
 
         // 4. Write to S3 (atomic operation)
-        tracing::debug!("Writing WAL entry to {} ({} bytes)", key, buf.len());
+        tracing::debug!(key = %key, size = buf.len(), "Writing WAL entry to object storage");
 
         self.storage.put(&key, Bytes::from(buf)).await?;
 
@@ -97,7 +124,7 @@ impl S3WalManager {
     ///
     /// Returns sorted list of WAL object keys.
     pub async fn list_wal_files(&self) -> Result<Vec<String>> {
-        let prefix = format!("{}/wal/", self.namespace);
+        let prefix = self.namespace_prefix();
 
         // Use storage backend's list operation
         let files = self.storage.list(&prefix).await?;
@@ -241,7 +268,7 @@ mod tests {
     async fn test_s3_wal_basic() {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
-        let wal = S3WalManager::new("test_ns".to_string(), "node1".to_string(), storage);
+        let wal = S3WalManager::new("test_ns".to_string(), "node1".to_string(), storage, None);
 
         // Append operation
         let op = WalOperation::Upsert {
@@ -272,7 +299,7 @@ mod tests {
     async fn test_s3_wal_multiple_entries() {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
-        let wal = S3WalManager::new("test_ns".to_string(), "node1".to_string(), storage);
+        let wal = S3WalManager::new("test_ns".to_string(), "node1".to_string(), storage, None);
 
         // Append multiple operations
         for i in 0..5 {
@@ -301,10 +328,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_s3_wal_prefix_and_truncate() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
+        let wal = S3WalManager::new(
+            "tenant_ns".to_string(),
+            "node-a".to_string(),
+            storage.clone(),
+            Some("tenant-a".to_string()),
+        );
+
+        let op = WalOperation::Upsert {
+            documents: vec![Document {
+                id: 42,
+                vector: None,
+                attributes: Default::default(),
+            }],
+        };
+
+        wal.append(op).await.unwrap();
+        wal.sync().await.unwrap();
+
+        let files = wal.list_wal_files().await.unwrap();
+        assert_eq!(files.len(), 1);
+        let normalized = files[0].replace('\\', "/");
+        assert!(normalized.starts_with("tenant-a/wal/tenant_ns/node-a/"));
+
+        wal.truncate().await.unwrap();
+
+        let files_after = wal.list_wal_files().await.unwrap();
+        assert!(files_after.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_s3_wal_truncate() {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
-        let wal = S3WalManager::new("test_ns".to_string(), "node1".to_string(), storage);
+        let wal = S3WalManager::new("test_ns".to_string(), "node1".to_string(), storage, None);
 
         // Append operations
         let op = WalOperation::Upsert {
@@ -334,8 +394,18 @@ mod tests {
         let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
 
         // Two nodes writing to same namespace
-        let wal1 = S3WalManager::new("test_ns".to_string(), "node1".to_string(), storage.clone());
-        let wal2 = S3WalManager::new("test_ns".to_string(), "node2".to_string(), storage.clone());
+        let wal1 = S3WalManager::new(
+            "test_ns".to_string(),
+            "node1".to_string(),
+            storage.clone(),
+            None,
+        );
+        let wal2 = S3WalManager::new(
+            "test_ns".to_string(),
+            "node2".to_string(),
+            storage.clone(),
+            None,
+        );
 
         // Node 1 writes
         let op1 = WalOperation::Upsert {

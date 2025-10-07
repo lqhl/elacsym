@@ -13,8 +13,8 @@ use elacsym::types::{AttributeSchema, AttributeType, DistanceMetric, Document, S
 
 /// Test cluster setup with 3 indexer nodes
 struct TestCluster {
-    storage_dir: TempDir,
-    storage: Arc<dyn elacsym::storage::StorageBackend>,
+    _storage_dir: TempDir,
+    _storage: Arc<dyn elacsym::storage::StorageBackend>,
     indexers: Vec<(Arc<NamespaceManager>, Arc<IndexerCluster>)>,
     query_node: Arc<NamespaceManager>,
 }
@@ -53,8 +53,8 @@ impl TestCluster {
         ));
 
         Self {
-            storage_dir,
-            storage,
+            _storage_dir: storage_dir,
+            _storage: storage,
             indexers,
             query_node,
         }

@@ -26,12 +26,12 @@ use crate::{Error, Result};
 pub use compaction::{CompactionConfig, CompactionManager};
 
 /// Configuration describing how namespaces should build their WAL backends.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum WalConfig {
     /// Local filesystem WAL stored under the given base directory.
     Local { base_path: PathBuf },
-    /// S3-backed WAL shared across nodes.
-    S3,
+    /// S3-backed WAL shared across nodes with an optional object prefix for multi-tenant buckets.
+    S3 { prefix: Option<String> },
 }
 
 impl WalConfig {
@@ -43,8 +43,8 @@ impl WalConfig {
     }
 
     /// Convenience helper for S3-backed WALs.
-    pub fn s3() -> Self {
-        Self::S3
+    pub fn s3(prefix: Option<String>) -> Self {
+        Self::S3 { prefix }
     }
 
     /// Build a WAL backend for the provided namespace.
@@ -60,8 +60,13 @@ impl WalConfig {
                 let wal = WalManager::new(&path).await?;
                 Ok(Box::new(wal))
             }
-            WalConfig::S3 => {
-                let wal = S3WalManager::new(namespace.to_string(), node_id.to_string(), storage);
+            WalConfig::S3 { prefix } => {
+                let wal = S3WalManager::new(
+                    namespace.to_string(),
+                    node_id.to_string(),
+                    storage,
+                    prefix.clone(),
+                );
                 Ok(Box::new(wal))
             }
         }
@@ -173,15 +178,14 @@ impl Namespace {
 
         // Replay WAL entries if any exist (crash recovery)
         {
-            let wal_guard = namespace.wal.read().await;
+            let mut wal_guard = namespace.wal.write().await;
             let operations = wal_guard.replay().await?;
-            drop(wal_guard);
 
             if !operations.is_empty() {
                 tracing::info!(
-                    "Replaying {} WAL operations for namespace '{}'",
-                    operations.len(),
-                    name
+                    namespace = %name,
+                    wal_entries = operations.len(),
+                    "Replaying WAL operations for namespace"
                 );
 
                 for op in operations {
@@ -199,10 +203,8 @@ impl Namespace {
                     }
                 }
 
-                // Truncate WAL after successful replay
-                let mut wal_guard = namespace.wal.write().await;
                 wal_guard.truncate().await?;
-                tracing::info!("WAL replay complete for namespace '{}'", name);
+                tracing::info!(namespace = %name, "WAL replay complete for namespace");
             }
         }
 
@@ -381,7 +383,7 @@ impl Namespace {
                 if let AttributeValue::String(text) = value {
                     all_texts
                         .entry(field_name.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push((doc.id, text.clone()));
                 }
             }
@@ -689,7 +691,7 @@ impl Namespace {
                 if doc_id >= &segment.id_range.0 && doc_id <= &segment.id_range.1 {
                     segment_to_docs
                         .entry(segment.segment_id.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(*doc_id);
                     break;
                 }
