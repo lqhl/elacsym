@@ -9,6 +9,7 @@
 
 pub mod s3;
 
+use async_trait::async_trait;
 use bytes::{BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -54,6 +55,22 @@ pub struct WalEntry {
 
 const WAL_MAGIC: &[u8; 4] = b"EWAL";
 const WAL_VERSION: u32 = 1;
+
+/// Abstraction over WAL backends used by namespaces.
+#[async_trait]
+pub trait Wal: Send + Sync {
+    /// Append an operation to the WAL and return its sequence number.
+    async fn append(&mut self, operation: WalOperation) -> Result<u64>;
+
+    /// Ensure WAL contents are durable.
+    async fn sync(&mut self) -> Result<()>;
+
+    /// Replay all pending operations from the WAL.
+    async fn replay(&self) -> Result<Vec<WalOperation>>;
+
+    /// Truncate committed WAL entries.
+    async fn truncate(&mut self) -> Result<()>;
+}
 
 /// Write-Ahead Log manager
 pub struct WalManager {
@@ -466,6 +483,44 @@ impl WalManager {
             .map_err(|e| Error::internal(format!("Failed to sync WAL file: {}", e)))?;
 
         Ok(())
+    }
+}
+
+#[async_trait]
+impl Wal for WalManager {
+    async fn append(&mut self, operation: WalOperation) -> Result<u64> {
+        WalManager::append(self, operation).await
+    }
+
+    async fn sync(&mut self) -> Result<()> {
+        WalManager::sync(self).await
+    }
+
+    async fn replay(&self) -> Result<Vec<WalOperation>> {
+        WalManager::replay(self).await
+    }
+
+    async fn truncate(&mut self) -> Result<()> {
+        WalManager::truncate(self).await
+    }
+}
+
+#[async_trait]
+impl Wal for S3WalManager {
+    async fn append(&mut self, operation: WalOperation) -> Result<u64> {
+        S3WalManager::append(self, operation).await
+    }
+
+    async fn sync(&mut self) -> Result<()> {
+        S3WalManager::sync(self).await
+    }
+
+    async fn replay(&self) -> Result<Vec<WalOperation>> {
+        S3WalManager::replay(self).await
+    }
+
+    async fn truncate(&mut self) -> Result<()> {
+        S3WalManager::truncate(self).await
     }
 }
 

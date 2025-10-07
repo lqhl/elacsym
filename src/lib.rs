@@ -9,6 +9,7 @@
 
 pub mod api;
 pub mod cache;
+pub mod config;
 pub mod error;
 pub mod index;
 pub mod manifest;

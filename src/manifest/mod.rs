@@ -132,7 +132,11 @@ impl ManifestManager {
             }
             Err(_) => {
                 // Try legacy manifest.json
-                if self.storage.exists(&Self::legacy_manifest_key(namespace)).await? {
+                if self
+                    .storage
+                    .exists(&Self::legacy_manifest_key(namespace))
+                    .await?
+                {
                     // Migrate from legacy
                     tracing::info!("Migrating namespace '{}' to versioned manifests", namespace);
                     Ok(0) // Will create v1 on next save
@@ -179,7 +183,8 @@ impl ManifestManager {
         let data = Bytes::from(json.into_bytes());
 
         // Read current version (or 0 if not exists)
-        let current_version = self.read_current_version(&manifest.namespace)
+        let current_version = self
+            .read_current_version(&manifest.namespace)
             .await
             .unwrap_or(0);
 

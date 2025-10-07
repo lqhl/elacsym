@@ -230,9 +230,7 @@ impl VectorIndex {
             self.vectors.len(),
             index_bytes.len()
         );
-        storage
-            .put(&index_path, Bytes::from(index_bytes))
-            .await?;
+        storage.put(&index_path, Bytes::from(index_bytes)).await?;
 
         Ok(index_path)
     }

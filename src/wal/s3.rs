@@ -77,11 +77,7 @@ impl S3WalManager {
         );
 
         // 4. Write to S3 (atomic operation)
-        tracing::debug!(
-            "Writing WAL entry to {} ({} bytes)",
-            key,
-            buf.len()
-        );
+        tracing::debug!("Writing WAL entry to {} ({} bytes)", key, buf.len());
 
         self.storage.put(&key, Bytes::from(buf)).await?;
 
@@ -110,7 +106,11 @@ impl S3WalManager {
         let mut sorted_files = files;
         sorted_files.sort();
 
-        tracing::debug!("Found {} WAL files for namespace '{}'", sorted_files.len(), self.namespace);
+        tracing::debug!(
+            "Found {} WAL files for namespace '{}'",
+            sorted_files.len(),
+            self.namespace
+        );
 
         Ok(sorted_files)
     }
@@ -127,7 +127,11 @@ impl S3WalManager {
             return Ok(Vec::new());
         }
 
-        tracing::info!("Replaying {} WAL files for namespace '{}'", files.len(), self.namespace);
+        tracing::info!(
+            "Replaying {} WAL files for namespace '{}'",
+            files.len(),
+            self.namespace
+        );
 
         let mut operations = Vec::new();
 
@@ -178,7 +182,10 @@ impl S3WalManager {
 
         // Deserialize operation
         let operation: WalOperation = rmp_serde::from_slice(msg_data).map_err(|e| {
-            Error::internal(format!("Failed to deserialize WAL operation from {}: {}", key, e))
+            Error::internal(format!(
+                "Failed to deserialize WAL operation from {}: {}",
+                key, e
+            ))
         })?;
 
         Ok(operation)
@@ -195,7 +202,11 @@ impl S3WalManager {
             return Ok(());
         }
 
-        tracing::info!("Truncating {} WAL files for namespace '{}'", files.len(), self.namespace);
+        tracing::info!(
+            "Truncating {} WAL files for namespace '{}'",
+            files.len(),
+            self.namespace
+        );
 
         // Delete all WAL files for this namespace
         for file_key in files {

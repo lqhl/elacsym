@@ -1,9 +1,10 @@
-use elacsym::namespace::Namespace;
+use elacsym::namespace::{Namespace, WalConfig};
 use elacsym::storage::local::LocalStorage;
 use elacsym::types::{AttributeValue, DistanceMetric, Document, FullTextConfig, Schema};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
+use tokio::sync::RwLock;
 
 #[tokio::test]
 async fn test_compaction_merges_segments() {
@@ -30,12 +31,19 @@ async fn test_compaction_merges_segments() {
 
     // Create namespace
     let storage = Arc::new(LocalStorage::new(storage_path.clone()).unwrap());
+    let wal_path = storage_path.join("wal");
+    let wal_handle = Arc::new(RwLock::new(
+        WalConfig::local(wal_path.clone())
+            .build("test_compaction", storage.clone(), "test-node")
+            .await
+            .unwrap(),
+    ));
     let namespace = Namespace::create(
         "test_compaction".to_string(),
         schema.clone(),
         storage.clone(),
         None,
-        "test-node".to_string(),
+        wal_handle,
     )
     .await
     .unwrap();
@@ -141,13 +149,19 @@ async fn test_compaction_with_full_text_index() {
     };
 
     // Create namespace
-    let storage = Arc::new(LocalStorage::new(storage_path).unwrap());
+    let storage = Arc::new(LocalStorage::new(storage_path.clone()).unwrap());
+    let wal_handle = Arc::new(RwLock::new(
+        WalConfig::local(storage_path.join("wal"))
+            .build("test_compaction_fulltext", storage.clone(), "test-node")
+            .await
+            .unwrap(),
+    ));
     let namespace = Namespace::create(
         "test_compaction_fulltext".to_string(),
         schema,
         storage,
         None,
-        "test-node".to_string(),
+        wal_handle,
     )
     .await
     .unwrap();
@@ -230,10 +244,22 @@ async fn test_should_compact_threshold() {
     };
 
     // Create namespace
-    let storage = Arc::new(LocalStorage::new(storage_path).unwrap());
-    let namespace = Namespace::create("test_threshold".to_string(), schema, storage, None, "test-node".to_string())
-        .await
-        .unwrap();
+    let storage = Arc::new(LocalStorage::new(storage_path.clone()).unwrap());
+    let wal_handle = Arc::new(RwLock::new(
+        WalConfig::local(storage_path.join("wal"))
+            .build("test_threshold", storage.clone(), "test-node")
+            .await
+            .unwrap(),
+    ));
+    let namespace = Namespace::create(
+        "test_threshold".to_string(),
+        schema,
+        storage,
+        None,
+        wal_handle,
+    )
+    .await
+    .unwrap();
 
     // Initially should not need compaction
     assert!(

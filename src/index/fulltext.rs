@@ -320,23 +320,20 @@ impl FullTextIndex {
         }
 
         // 1. Create temporary directory for Tantivy
-        let temp_dir = std::env::temp_dir().join(format!(
-            "tantivy_{}_{}",
-            segment_id,
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&temp_dir).map_err(|e| {
-            Error::internal(format!("Failed to create temp directory: {}", e))
-        })?;
+        let temp_dir =
+            std::env::temp_dir().join(format!("tantivy_{}_{}", segment_id, uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir)
+            .map_err(|e| Error::internal(format!("Failed to create temp directory: {}", e)))?;
 
         // 2. Build index on disk
         let mut index = Self::new_persistent(field_name.clone(), &temp_dir)?;
         index.add_documents(documents)?;
 
         // Ensure all changes are committed
-        index.writer.commit().map_err(|e| {
-            Error::internal(format!("Failed to commit Tantivy index: {}", e))
-        })?;
+        index
+            .writer
+            .commit()
+            .map_err(|e| Error::internal(format!("Failed to commit Tantivy index: {}", e)))?;
 
         // 3. Compress index directory to tarball
         tracing::info!(
@@ -401,13 +398,11 @@ fn compress_directory(dir: &Path) -> Result<Vec<u8>> {
         let mut tar = tar::Builder::new(gz);
 
         // Add all files in directory
-        tar.append_dir_all(".", dir).map_err(|e| {
-            Error::internal(format!("Failed to create tarball: {}", e))
-        })?;
+        tar.append_dir_all(".", dir)
+            .map_err(|e| Error::internal(format!("Failed to create tarball: {}", e)))?;
 
-        tar.finish().map_err(|e| {
-            Error::internal(format!("Failed to finish tarball: {}", e))
-        })?;
+        tar.finish()
+            .map_err(|e| Error::internal(format!("Failed to finish tarball: {}", e)))?;
     } // Drop tar and gz here
 
     Ok(buf)
@@ -418,9 +413,8 @@ fn decompress_tarball(data: &[u8], dest: &Path) -> Result<()> {
     let gz = GzDecoder::new(data);
     let mut tar = tar::Archive::new(gz);
 
-    tar.unpack(dest).map_err(|e| {
-        Error::internal(format!("Failed to extract tarball: {}", e))
-    })?;
+    tar.unpack(dest)
+        .map_err(|e| Error::internal(format!("Failed to extract tarball: {}", e)))?;
 
     Ok(())
 }

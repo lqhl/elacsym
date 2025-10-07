@@ -13,6 +13,9 @@ pub struct AppState {
 
     /// Indexer cluster configuration (optional for single-node mode)
     pub cluster: Option<Arc<IndexerCluster>>,
+
+    /// Role for this node
+    role: NodeRole,
 }
 
 impl AppState {
@@ -24,22 +27,31 @@ impl AppState {
         Self {
             manager,
             cluster: Some(cluster),
+            role: NodeRole::Indexer,
         }
     }
 
     /// Create state for multi-node mode
-    pub fn multi_node(manager: Arc<NamespaceManager>, cluster: Arc<IndexerCluster>) -> Self {
+    pub fn multi_node(
+        manager: Arc<NamespaceManager>,
+        cluster: Arc<IndexerCluster>,
+        role: NodeRole,
+    ) -> Self {
         Self {
             manager,
             cluster: Some(cluster),
+            role,
         }
     }
 
     /// Check if this node should handle a namespace
     pub fn should_handle(&self, namespace: &str) -> bool {
-        match &self.cluster {
-            Some(cluster) => cluster.should_handle(namespace),
-            None => true, // No cluster config = handle all
+        match self.role {
+            NodeRole::Indexer => match &self.cluster {
+                Some(cluster) => cluster.should_handle(namespace),
+                None => true,
+            },
+            NodeRole::Query => false,
         }
     }
 
@@ -54,4 +66,16 @@ impl AppState {
     pub fn node_id(&self) -> &str {
         self.manager.node_id()
     }
+
+    /// Return this node's role.
+    pub fn role(&self) -> NodeRole {
+        self.role
+    }
+}
+
+/// Role of a node in the cluster.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NodeRole {
+    Indexer,
+    Query,
 }
