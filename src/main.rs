@@ -182,10 +182,14 @@ fn build_app_state(
                 }
             };
 
+            manager.set_compaction_enabled(matches!(role, NodeRole::Indexer));
+
             let state = AppState::multi_node(manager, cluster, role);
             return Ok((state, description));
         }
     }
+
+    manager.set_compaction_enabled(true);
 
     Ok((AppState::single_node(manager), "single-node"))
 }

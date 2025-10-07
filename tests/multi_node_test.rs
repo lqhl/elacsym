@@ -51,6 +51,7 @@ impl TestCluster {
             WalConfig::local(wal_root.clone()),
             "query-node-1".to_string(),
         ));
+        query_node.set_compaction_enabled(false);
 
         Self {
             _storage_dir: storage_dir,
@@ -187,6 +188,36 @@ async fn test_write_and_query_across_nodes() {
 
     assert_eq!(results.len(), 2);
     println!("Query results: {} documents found", results.len());
+}
+
+#[tokio::test]
+async fn test_query_node_does_not_run_compaction() {
+    let cluster = TestCluster::new(2).await;
+
+    let schema = Schema {
+        vector_dim: 16,
+        vector_metric: DistanceMetric::L2,
+        attributes: HashMap::new(),
+    };
+
+    let ns_name = "no_compaction";
+    let indexer = cluster.get_indexer_for_namespace(ns_name);
+    indexer
+        .create_namespace(ns_name.to_string(), schema.clone())
+        .await
+        .unwrap();
+
+    // Loading through the query node should not register a compaction manager
+    cluster
+        .query_node
+        .get_namespace(ns_name)
+        .await
+        .expect("query node should load namespace");
+
+    assert!(
+        !cluster.query_node.has_compaction_manager(ns_name).await,
+        "query nodes must not start compaction managers"
+    );
 }
 
 #[tokio::test]

@@ -10,6 +10,7 @@ pub mod compaction;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -1086,6 +1087,7 @@ pub struct NamespaceManager {
     compaction_managers: Arc<RwLock<HashMap<String, Arc<CompactionManager>>>>,
     wal_config: WalConfig,
     node_id: String, // Node ID for this manager
+    compaction_enabled: AtomicBool,
 }
 
 impl NamespaceManager {
@@ -1098,6 +1100,7 @@ impl NamespaceManager {
             compaction_managers: Arc::new(RwLock::new(HashMap::new())),
             wal_config,
             node_id,
+            compaction_enabled: AtomicBool::new(true),
         }
     }
 
@@ -1116,6 +1119,7 @@ impl NamespaceManager {
             compaction_managers: Arc::new(RwLock::new(HashMap::new())),
             wal_config,
             node_id,
+            compaction_enabled: AtomicBool::new(true),
         }
     }
 
@@ -1135,6 +1139,7 @@ impl NamespaceManager {
             compaction_managers: Arc::new(RwLock::new(HashMap::new())),
             wal_config,
             node_id,
+            compaction_enabled: AtomicBool::new(true),
         }
     }
 
@@ -1149,6 +1154,16 @@ impl NamespaceManager {
     /// Get the node ID
     pub fn node_id(&self) -> &str {
         &self.node_id
+    }
+
+    /// Enable or disable background compaction.
+    pub fn set_compaction_enabled(&self, enabled: bool) {
+        self.compaction_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Check if compaction is enabled for this manager.
+    pub fn compaction_enabled(&self) -> bool {
+        self.compaction_enabled.load(Ordering::Relaxed)
     }
 
     /// Create a new namespace
@@ -1177,21 +1192,21 @@ impl NamespaceManager {
             .await?,
         );
 
-        // Start compaction manager for this namespace
-        let compaction_manager = Arc::new(CompactionManager::new(self.compaction_config.clone()));
-        compaction_manager
-            .start_for_namespace(namespace.clone())
-            .await?;
+        // Start compaction manager for this namespace when enabled
+        if self.compaction_enabled() {
+            let compaction_manager =
+                Arc::new(CompactionManager::new(self.compaction_config.clone()));
+            compaction_manager
+                .start_for_namespace(namespace.clone())
+                .await?;
+
+            let mut managers = self.compaction_managers.write().await;
+            managers.insert(name.clone(), compaction_manager);
+        }
 
         // Store in caches
-        {
-            let mut namespaces = self.namespaces.write().await;
-            namespaces.insert(name.clone(), namespace.clone());
-        }
-        {
-            let mut managers = self.compaction_managers.write().await;
-            managers.insert(name, compaction_manager);
-        }
+        let mut namespaces = self.namespaces.write().await;
+        namespaces.insert(name, namespace.clone());
 
         Ok(namespace)
     }
@@ -1218,23 +1233,26 @@ impl NamespaceManager {
             .await?,
         );
 
-        // Start compaction manager for this namespace (if not already started)
-        let compaction_manager = Arc::new(CompactionManager::new(self.compaction_config.clone()));
-        compaction_manager
-            .start_for_namespace(namespace.clone())
-            .await?;
+        if self.compaction_enabled() {
+            let compaction_manager =
+                Arc::new(CompactionManager::new(self.compaction_config.clone()));
+            compaction_manager
+                .start_for_namespace(namespace.clone())
+                .await?;
 
-        // Store in caches
-        {
-            let mut namespaces = self.namespaces.write().await;
-            namespaces.insert(name.to_string(), namespace.clone());
-        }
-        {
             let mut managers = self.compaction_managers.write().await;
             managers.insert(name.to_string(), compaction_manager);
         }
 
+        let mut namespaces = self.namespaces.write().await;
+        namespaces.insert(name.to_string(), namespace.clone());
+
         Ok(namespace)
+    }
+
+    pub async fn has_compaction_manager(&self, namespace: &str) -> bool {
+        let managers = self.compaction_managers.read().await;
+        managers.contains_key(namespace)
     }
 
     /// List all namespaces

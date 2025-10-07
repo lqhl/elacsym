@@ -1,15 +1,8 @@
 # Agent Task Plan
-
 ## Steps
-1. Review code review feedback from the distributed MinIO deployment work.
-2. Implement configuration and runtime fixes (validation, WAL replay, sharding, cache handling).
-3. Update WAL/S3 keying and documentation improvements requested in review.
-4. Add regression tests covering new validation and sharding behaviour.
-5. Run the automated test suite to verify the fixes.
-
+- [x] Analyse compaction initialization to confirm query nodes start background work.
+- [x] Implement role-aware compaction gating in `NamespaceManager` so read-only nodes skip background tasks.
+- [x] Update node setup code and helpers to disable compaction on query nodes.
+- [x] Add regression tests ensuring query nodes avoid spawning compaction managers.
+- [x] Run linting and test suites to verify changes.
 ## Progress
-- [x] Step 1
-- [x] Step 2
-- [x] Step 3
-- [x] Step 4
-- [x] Step 5
