@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elacsym-query
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: elacsym-query
+  template:
+    metadata:
+      labels:
+        app: elacsym-query
+    spec:
+      containers:
+        - name: elacsym
+          image: ghcr.io/lqhl/elacsym:latest
+          args: ["/usr/local/bin/elacsym"]
+          env:
+            - name: ELACSYM_NODE_ROLE
+              value: query
+            - name: ELACSYM_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: elacsym-storage
+                  key: accessKey
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: elacsym-storage
+                  key: secretKey
+          volumeMounts:
+            - name: config
+              mountPath: /etc/elacsym
+            - name: cache
+              mountPath: /var/cache/elacsym
+      volumes:
+        - name: config
+          configMap:
+            name: elacsym-config-query
+        - name: cache
+          emptyDir:
+            sizeLimit: 50Gi

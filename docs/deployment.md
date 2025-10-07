@@ -1,726 +1,497 @@
 # Deployment Guide
 
-This guide covers deploying Elacsym in production environments.
+## Table of Contents
+1. [Single-Node Deployment](#single-node-deployment)
+2. [Distributed Deployment](#distributed-deployment)
+   - [Architecture Overview](#architecture)
+   - [MinIO Setup](#minio-setup)
+   - [Multi-Node Configuration](#multi-node-configuration)
+   - [Deployment Examples](#deployment-examples)
+3. [Production Best Practices](#production-best-practices)
+4. [Troubleshooting](#troubleshooting)
+5. [Performance Tuning](#performance-tuning)
 
-## Quick Start
+## Single-Node Deployment
 
-### Single Node (Local Storage)
+Single-node mode is ideal for local development, proofs of concept, and small datasets (<1M documents).
+
+### Local Storage Quick Start
 
 ```bash
-# Build release binary
+# Build the release binary
 cargo build --release
 
-# Create data directory
+# Prepare data + cache directories
 mkdir -p /var/lib/elacsym /var/cache/elacsym
 
-# Run server
-ELACSYM_STORAGE_PATH=/var/lib/elacsym \
+# Launch the server with local filesystem storage
+ELACSYM_STORAGE_BACKEND=local \
+ELACSYM_STORAGE_LOCAL_ROOT_PATH=/var/lib/elacsym \
 ELACSYM_CACHE_DISK_PATH=/var/cache/elacsym \
 ./target/release/elacsym
 ```
 
-### Single Node (S3 Storage)
+### S3 Storage Quick Start
 
 ```bash
-# Configure AWS credentials
+# Provide S3 credentials
 export AWS_ACCESS_KEY_ID=your_access_key
 export AWS_SECRET_ACCESS_KEY=your_secret_key
 
-# Run server
+# Launch the server backed by S3
 ELACSYM_STORAGE_BACKEND=s3 \
-ELACSYM_S3_BUCKET=elacsym-production \
-ELACSYM_S3_REGION=us-west-2 \
+ELACSYM_STORAGE_S3_BUCKET=elacsym-production \
+ELACSYM_STORAGE_S3_REGION=us-west-2 \
 ./target/release/elacsym
 ```
 
-## System Requirements
+## Distributed Deployment
 
-### Minimum (Development)
-- CPU: 2 cores
-- RAM: 4GB
-- Disk: 20GB SSD
-- Network: 1 Gbps
+Distributed mode unlocks horizontal scalability with dedicated indexer and query nodes backed by a shared S3-compatible object store.
 
-### Recommended (Production)
-- CPU: 8+ cores
-- RAM: 16GB+ (8GB cache + 8GB system)
-- Disk: 500GB+ NVMe SSD (for cache)
-- Network: 10 Gbps
+### Architecture
 
-### Scaling Guidelines
+#### Node Roles
+- **Indexer Nodes**: Own namespace shards, handle writes (upsert), maintain manifests, and run compaction.
+- **Query Nodes**: Stateless routers that forward reads to the responsible indexers. They never run compaction or accept writes.
 
-| Vectors | Documents | Memory Cache | Disk Cache | CPU Cores | Notes |
-|---------|-----------|--------------|------------|-----------|-------|
-| < 1M | < 1M | 2GB | 50GB | 4 | Single node sufficient |
-| 1M - 10M | 1M - 10M | 8GB | 200GB | 8 | Single node or 2-3 indexers |
-| 10M - 100M | 10M - 100M | 16GB | 1TB | 16 | 3-5 indexer nodes |
-| > 100M | > 100M | 32GB+ | 2TB+ | 32+ | 5+ indexer nodes + dedicated query nodes |
+#### Sharding Strategy
+Namespaces are assigned to indexers using consistent hashing:
+- Hash function: `seahash(namespace) % num_indexers`
+- Provides even distribution across indexers
+- Query routing is deterministic; no data migration on reads
 
-## Storage Backend
+### MinIO Setup
 
-### Local Filesystem
-
-**Pros**:
-- Fast (no network latency)
-- Simple setup
-- No external dependencies
-
-**Cons**:
-- Not distributed
-- Limited to single node capacity
-- No built-in replication
-
-**Use Cases**:
-- Development
-- Small datasets (< 1M vectors)
-- Edge deployments
-
-**Setup**:
-```bash
-mkdir -p /var/lib/elacsym
-chown elacsym:elacsym /var/lib/elacsym
-chmod 750 /var/lib/elacsym
-```
-
-### AWS S3
-
-**Pros**:
-- Cheap ($0.023/GB/month vs $2-4/GB/month for RAM)
-- Unlimited capacity
-- Built-in durability (99.999999999%)
-- Multi-region support
-
-**Cons**:
-- Higher latency (mitigated by caching)
-- Requires AWS account
-
-**Setup**:
-
-1. **Create S3 Bucket**:
-```bash
-aws s3 mb s3://elacsym-production --region us-west-2
-```
-
-2. **Set Lifecycle Policy** (optional, for old WAL cleanup):
-```json
-{
-  "Rules": [{
-    "Id": "DeleteOldWAL",
-    "Status": "Enabled",
-    "Filter": {"Prefix": "*/wal/"},
-    "Expiration": {"Days": 7}
-  }]
-}
-```
-
-3. **Create IAM User**:
-```bash
-aws iam create-user --user-name elacsym-production
-```
-
-4. **Attach Policy**:
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": [
-      "s3:GetObject",
-      "s3:PutObject",
-      "s3:DeleteObject",
-      "s3:ListBucket"
-    ],
-    "Resource": [
-      "arn:aws:s3:::elacsym-production",
-      "arn:aws:s3:::elacsym-production/*"
-    ]
-  }]
-}
-```
-
-5. **Generate Access Keys**:
-```bash
-aws iam create-access-key --user-name elacsym-production
-```
-
-### MinIO (Self-Hosted S3)
-
-**Pros**:
-- S3-compatible (no code changes)
-- Self-hosted (no AWS account needed)
-- Lower latency than public cloud
-
-**Setup**:
-
-1. **Run MinIO**:
-```bash
-docker run -d \
-  -p 9000:9000 -p 9001:9001 \
-  -e "MINIO_ROOT_USER=admin" \
-  -e "MINIO_ROOT_PASSWORD=password" \
-  -v /data/minio:/data \
-  minio/minio server /data --console-address ":9001"
-```
-
-2. **Create Bucket**:
-```bash
-mc alias set myminio http://localhost:9000 admin password
-mc mb myminio/elacsym
-```
-
-3. **Configure Elacsym**:
-```toml
-[storage]
-backend = "s3"
-
-[storage.s3]
-bucket = "elacsym"
-region = "us-east-1"  # Any value works
-endpoint = "http://localhost:9000"
-```
-
-## Deployment Architectures
-
-### Architecture 1: Single Node
-
-```
-┌─────────────────────────────────────┐
-│         Client Applications         │
-└─────────────────────────────────────┘
-                  ↓
-         ┌───────────────┐
-         │  Load Balancer│ (optional)
-         └───────────────┘
-                  ↓
-    ┌──────────────────────────┐
-    │    Elacsym Server        │
-    │  (Indexer + Query Node)  │
-    │                          │
-    │  - Cache: 8GB + 200GB    │
-    │  - Storage: S3           │
-    └──────────────────────────┘
-```
-
-**Pros**: Simple, easy to manage
-**Cons**: Single point of failure, limited write throughput
-**Best for**: < 10M vectors, < 1000 qps
-
-### Architecture 2: Distributed (3 Indexers + 2 Query Nodes)
-
-```
-┌─────────────────────────────────────┐
-│         Client Applications         │
-└─────────────────────────────────────┘
-                  ↓
-         ┌───────────────┐
-         │  Load Balancer│
-         └───────────────┘
-          ↓       ↓      ↓
-    ┌─────┴──┐  ┌┴──────┴──────┐
-    │ Query  │  │   Query Node  │
-    │ Node 1 │  │   Node 2      │
-    └────────┘  └───────────────┘
-      ↓   ↓        ↓
-      ↓   └────┬───┘
-      ↓        ↓
-  ┌───────────────────────────────────┐
-  │     Indexer Nodes (Writes)        │
-  │  ┌─────────┬─────────┬─────────┐  │
-  │  │Indexer 0│Indexer 1│Indexer 2│  │
-  │  └─────────┴─────────┴─────────┘  │
-  └───────────────────────────────────┘
-                  ↓
-         ┌───────────────┐
-         │   S3 Storage  │
-         │  (Shared)     │
-         └───────────────┘
-```
-
-**Pros**: High availability, write sharding, read scaling
-**Cons**: More complex, requires coordination
-**Best for**: > 10M vectors, > 1000 qps
-
-**Configuration**:
-
-**Indexer Node 0**:
-```toml
-[distributed]
-enabled = true
-node_id = "indexer-0"
-role = "indexer"
-
-[distributed.indexer_cluster]
-nodes = ["indexer-0", "indexer-1", "indexer-2"]
-```
-
-**Query Node**:
-```toml
-[distributed]
-enabled = true
-node_id = "query-0"
-role = "query"
-
-[distributed.indexer_cluster]
-nodes = ["indexer-0", "indexer-1", "indexer-2"]
-```
-
-## Docker Deployment
-
-### Dockerfile
-
-```dockerfile
-FROM rust:1.75 as builder
-
-WORKDIR /app
-COPY . .
-RUN cargo build --release
-
-FROM debian:bookworm-slim
-
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create user
-RUN useradd -m -u 1000 elacsym
-
-# Copy binary
-COPY --from=builder /app/target/release/elacsym /usr/local/bin/
-
-# Create directories
-RUN mkdir -p /var/lib/elacsym /var/cache/elacsym && \
-    chown -R elacsym:elacsym /var/lib/elacsym /var/cache/elacsym
-
-USER elacsym
-WORKDIR /home/elacsym
-
-EXPOSE 3000
-
-CMD ["elacsym"]
-```
-
-### Docker Compose (Single Node)
-
-```yaml
-version: '3.8'
-
-services:
-  elacsym:
-    build: .
-    ports:
-      - "3000:3000"
-    environment:
-      - ELACSYM_STORAGE_BACKEND=local
-      - ELACSYM_STORAGE_PATH=/data
-      - ELACSYM_CACHE_MEMORY_SIZE=4294967296
-      - ELACSYM_CACHE_DISK_SIZE=107374182400
-      - RUST_LOG=info
-    volumes:
-      - elacsym-data:/data
-      - elacsym-cache:/cache
-    restart: unless-stopped
-
-volumes:
-  elacsym-data:
-  elacsym-cache:
-```
-
-### Docker Compose (with MinIO)
-
+#### Docker Compose (Development)
 ```yaml
 version: '3.8'
 
 services:
   minio:
-    image: minio/minio
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
     ports:
       - "9000:9000"
       - "9001:9001"
     environment:
-      - MINIO_ROOT_USER=admin
-      - MINIO_ROOT_PASSWORD=password123
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
     volumes:
-      - minio-data:/data
-    command: server /data --console-address ":9001"
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
-  elacsym:
-    build: .
+  minio-init:
+    image: minio/mc:latest
     depends_on:
       - minio
-    ports:
-      - "3000:3000"
-    environment:
-      - ELACSYM_STORAGE_BACKEND=s3
-      - ELACSYM_S3_BUCKET=elacsym
-      - ELACSYM_S3_REGION=us-east-1
-      - ELACSYM_S3_ENDPOINT=http://minio:9000
-      - AWS_ACCESS_KEY_ID=admin
-      - AWS_SECRET_ACCESS_KEY=password123
-      - RUST_LOG=info
-    volumes:
-      - elacsym-cache:/cache
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set myminio http://minio:9000 minioadmin minioadmin;
+      mc mb myminio/elacsym-data || true;
+      mc anonymous set download myminio/elacsym-data;
+      exit 0;
+      "
 
 volumes:
-  minio-data:
-  elacsym-cache:
+  minio_data:
 ```
 
-Run:
+Start MinIO locally:
 ```bash
 docker-compose up -d
+# Access the management UI at http://localhost:9001
 ```
 
-## Kubernetes Deployment
-
-### StatefulSet (Single Node)
-
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: elacsym-config
-data:
-  config.toml: |
-    [server]
-    host = "0.0.0.0"
-    port = 3000
-
-    [storage]
-    backend = "s3"
-
-    [storage.s3]
-    bucket = "elacsym-production"
-    region = "us-west-2"
-
-    [cache]
-    memory_size = 8589934592
-    disk_size = 214748364800
-    disk_path = "/cache"
-
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: aws-credentials
-type: Opaque
-stringData:
-  AWS_ACCESS_KEY_ID: your_access_key
-  AWS_SECRET_ACCESS_KEY: your_secret_key
-
----
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: elacsym
-spec:
-  serviceName: elacsym
-  replicas: 1
-  selector:
-    matchLabels:
-      app: elacsym
-  template:
-    metadata:
-      labels:
-        app: elacsym
-    spec:
-      containers:
-      - name: elacsym
-        image: elacsym:latest
-        ports:
-        - containerPort: 3000
-          name: http
-        env:
-        - name: AWS_ACCESS_KEY_ID
-          valueFrom:
-            secretKeyRef:
-              name: aws-credentials
-              key: AWS_ACCESS_KEY_ID
-        - name: AWS_SECRET_ACCESS_KEY
-          valueFrom:
-            secretKeyRef:
-              name: aws-credentials
-              key: AWS_SECRET_ACCESS_KEY
-        volumeMounts:
-        - name: config
-          mountPath: /etc/elacsym
-        - name: cache
-          mountPath: /cache
-        resources:
-          requests:
-            memory: "16Gi"
-            cpu: "4"
-          limits:
-            memory: "24Gi"
-            cpu: "8"
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 3000
-          initialDelaySeconds: 30
-          periodSeconds: 10
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 3000
-          initialDelaySeconds: 5
-          periodSeconds: 5
-      volumes:
-      - name: config
-        configMap:
-          name: elacsym-config
-  volumeClaimTemplates:
-  - metadata:
-      name: cache
-    spec:
-      accessModes: ["ReadWriteOnce"]
-      storageClassName: fast-ssd
-      resources:
-        requests:
-          storage: 500Gi
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: elacsym
-spec:
-  selector:
-    app: elacsym
-  ports:
-  - port: 3000
-    targetPort: 3000
-  type: LoadBalancer
-```
-
-### Distributed Deployment (3 Indexers)
-
-See `examples/kubernetes/distributed.yaml` (to be added).
-
-## Monitoring
-
-### Health Checks
-
+#### Production MinIO Setup
 ```bash
-# Liveness probe
+# Download and install MinIO server
+wget https://dl.min.io/server/minio/release/linux-amd64/minio
+chmod +x minio
+
+# Run with a persistent data directory
+./minio server /data/minio --console-address ":9001"
+
+# Create the bucket used by Elacsym
+mc alias set production http://your-minio-server:9000 ACCESS_KEY SECRET_KEY
+mc mb production/elacsym-prod
+```
+
+### Multi-Node Configuration
+
+#### Config File: `config.toml`
+
+**Indexer Node 1** (`/etc/elacsym/config-indexer-1.toml`):
+```toml
+[server]
+host = "0.0.0.0"
+port = 3000
+
+[storage]
+backend = "s3"
+
+[storage.s3]
+bucket = "elacsym-data"
+region = "us-east-1"
+endpoint = "http://minio:9000"
+wal_prefix = "production"
+
+[cache]
+memory_size = 8589934592        # 8 GiB
+disk_size = 107374182400        # 100 GiB
+disk_path = "/var/cache/elacsym"
+
+[compaction]
+enabled = true
+interval_secs = 3600
+max_segments = 100
+max_total_docs = 1000000
+
+[logging]
+level = "info"
+format = "json"
+
+[distributed]
+enabled = true
+node_id = "indexer-1"
+role = "indexer"
+
+[distributed.indexer_cluster]
+nodes = [
+    "indexer-1",
+    "indexer-2",
+    "indexer-3"
+]
+```
+
+**Indexer Node 2** (`/etc/elacsym/config-indexer-2.toml`):
+```toml
+# Same as indexer-1, but override the node ID
+[distributed]
+enabled = true
+node_id = "indexer-2"
+role = "indexer"
+```
+
+**Query Node** (`/etc/elacsym/config-query-1.toml`):
+```toml
+[server]
+host = "0.0.0.0"
+port = 3000
+
+[storage]
+backend = "s3"
+
+[storage.s3]
+bucket = "elacsym-data"
+region = "us-east-1"
+endpoint = "http://minio:9000"
+wal_prefix = "production"
+
+[cache]
+memory_size = 4294967296        # 4 GiB
+disk_size = 53687091200         # 50 GiB
+
+[compaction]
+enabled = false
+
+[logging]
+level = "info"
+format = "json"
+
+[distributed]
+enabled = true
+node_id = "query-1"
+role = "query"
+
+[distributed.indexer_cluster]
+nodes = [
+    "indexer-1",
+    "indexer-2",
+    "indexer-3"
+]
+```
+
+#### Environment Variable Overrides
+```bash
+# Override identity
+export ELACSYM_NODE_ID=indexer-1
+export ELACSYM_NODE_ROLE=indexer
+
+# Override storage target
+export ELACSYM_STORAGE_BACKEND=s3
+export ELACSYM_STORAGE_S3_BUCKET=my-bucket
+export ELACSYM_STORAGE_S3_REGION=us-west-2
+
+# AWS credentials for production S3
+export AWS_ACCESS_KEY_ID=your-key
+export AWS_SECRET_ACCESS_KEY=your-secret
+```
+
+### Deployment Examples
+
+#### Docker Compose (Complete Cluster)
+Create `examples/distributed/docker-compose.yml`:
+```yaml
+version: '3.8'
+
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+
+  indexer-1:
+    image: elacsym:latest
+    environment:
+      ELACSYM_NODE_ID: indexer-1
+      ELACSYM_NODE_ROLE: indexer
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    volumes:
+      - ./config-indexer.toml:/etc/elacsym/config.toml
+      - indexer1_cache:/var/cache/elacsym
+    ports:
+      - "3001:3000"
+    depends_on:
+      - minio
+
+  indexer-2:
+    image: elacsym:latest
+    environment:
+      ELACSYM_NODE_ID: indexer-2
+      ELACSYM_NODE_ROLE: indexer
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    volumes:
+      - ./config-indexer.toml:/etc/elacsym/config.toml
+      - indexer2_cache:/var/cache/elacsym
+    ports:
+      - "3002:3000"
+    depends_on:
+      - minio
+
+  indexer-3:
+    image: elacsym:latest
+    environment:
+      ELACSYM_NODE_ID: indexer-3
+      ELACSYM_NODE_ROLE: indexer
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    volumes:
+      - ./config-indexer.toml:/etc/elacsym/config.toml
+      - indexer3_cache:/var/cache/elacsym
+    ports:
+      - "3003:3000"
+    depends_on:
+      - minio
+
+  query-1:
+    image: elacsym:latest
+    environment:
+      ELACSYM_NODE_ID: query-1
+      ELACSYM_NODE_ROLE: query
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    volumes:
+      - ./config-query.toml:/etc/elacsym/config.toml
+      - query1_cache:/var/cache/elacsym
+    ports:
+      - "3000:3000"
+    depends_on:
+      - indexer-1
+      - indexer-2
+      - indexer-3
+
+  nginx:
+    image: nginx:alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+    ports:
+      - "80:80"
+    depends_on:
+      - query-1
+
+volumes:
+  minio_data:
+  indexer1_cache:
+  indexer2_cache:
+  indexer3_cache:
+  query1_cache:
+```
+
+#### Nginx Load Balancer Config
+Create `examples/distributed/nginx.conf`:
+```nginx
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream indexers {
+        server indexer-1:3000;
+        server indexer-2:3000;
+        server indexer-3:3000;
+    }
+
+    upstream query_nodes {
+        server query-1:3000;
+    }
+
+    server {
+        listen 80;
+
+        # Route writes to indexers
+        location ~ ^/v1/namespaces/.*/upsert$ {
+            proxy_pass http://indexers;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        # Route reads to query nodes
+        location ~ ^/v1/namespaces/.*/query$ {
+            proxy_pass http://query_nodes;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        # Default to indexers for control-plane APIs
+        location / {
+            proxy_pass http://indexers;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+    }
+}
+```
+
+#### Running the Cluster
+```bash
+cd examples/distributed
+
+docker-compose up -d
+
+# Health checks
+curl http://localhost:3001/health
+curl http://localhost:3002/health
+curl http://localhost:3003/health
 curl http://localhost:3000/health
 
-# Expected response
-{"status":"healthy","version":"0.1.0","namespaces":5}
-```
-
-### Logs
-
-**Structured JSON logs** (recommended for production):
-```bash
-RUST_LOG=info ./elacsym 2>&1 | jq
-```
-
-**Send to logging system**:
-```bash
-# Fluent Bit
-./elacsym 2>&1 | fluent-bit -c fluent-bit.conf
-
-# Logstash
-./elacsym 2>&1 | logstash -f logstash.conf
-
-# CloudWatch Logs (AWS)
-./elacsym 2>&1 | aws logs put-log-events ...
-```
-
-### Metrics (Coming in P1)
-
-Future: Prometheus `/metrics` endpoint
-
-```
-# HELP elacsym_query_duration_seconds Query duration
-# TYPE elacsym_query_duration_seconds histogram
-elacsym_query_duration_seconds_bucket{le="0.01"} 1000
-elacsym_query_duration_seconds_bucket{le="0.05"} 5000
-...
-
-# HELP elacsym_cache_hit_rate Cache hit rate
-# TYPE elacsym_cache_hit_rate gauge
-elacsym_cache_hit_rate{layer="memory"} 0.85
-elacsym_cache_hit_rate{layer="disk"} 0.92
-```
-
-## Backup and Recovery
-
-### Backup Strategy
-
-**What to backup**:
-- Manifests (critical): `{namespace}/manifest.json`
-- Segments (critical): `{namespace}/segments/*.parquet`
-- Indexes (can rebuild): `{namespace}/indexes/*`
-- WAL (temporary): Not needed in backups
-
-**S3 Backup** (automatic):
-- S3 has 99.999999999% durability
-- Enable versioning for accidental deletion protection:
-  ```bash
-  aws s3api put-bucket-versioning \
-    --bucket elacsym-production \
-    --versioning-configuration Status=Enabled
-  ```
-
-**Local Storage Backup**:
-```bash
-# Full backup
-tar czf elacsym-backup-$(date +%Y%m%d).tar.gz /var/lib/elacsym
-
-# Incremental backup (rsync)
-rsync -av --delete /var/lib/elacsym /backup/elacsym
-```
-
-### Disaster Recovery
-
-**Scenario 1: Corrupted WAL**
-- Automatic: WAL recovery skips corrupted entries
-- Manual: Delete WAL files (safe when server stopped)
-
-**Scenario 2: Lost Indexes**
-- Indexes are derived data (can rebuild)
-- Restart server: Indexes rebuild automatically from segments
-
-**Scenario 3: Lost Segments**
-- If using S3: Restore from S3 versioning
-- If using local: Restore from backup
-- Worst case: Data loss for affected segments
-
-**Scenario 4: Corrupted Manifest**
-- If using S3: Restore from S3 versioning
-- If using local: Restore previous version manually
-- Manifest contains segment list and schema
-
-## Security
-
-### Network Security
-
-1. **Firewall Rules**:
-```bash
-# Allow only from application servers
-iptables -A INPUT -p tcp --dport 3000 -s 10.0.0.0/8 -j ACCEPT
-iptables -A INPUT -p tcp --dport 3000 -j DROP
-```
-
-2. **TLS Termination** (use reverse proxy):
-```nginx
-server {
-    listen 443 ssl;
-    server_name elacsym.example.com;
-
-    ssl_certificate /etc/ssl/certs/elacsym.crt;
-    ssl_certificate_key /etc/ssl/private/elacsym.key;
-
-    location / {
-        proxy_pass http://localhost:3000;
+# Create namespace (automatically routed to responsible indexer)
+curl -X PUT http://localhost/v1/namespaces/my-docs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "vector_dim": 768,
+    "vector_metric": "cosine",
+    "attributes": {
+      "title": {"type": "string", "full_text": true}
     }
-}
+  }'
+
+# Upsert documents (goes to indexer cluster)
+curl -X POST http://localhost/v1/namespaces/my-docs/upsert \
+  -H "Content-Type: application/json" \
+  -d '{
+    "documents": [
+      {
+        "id": 1,
+        "vector": [0.1, 0.2, 0.3],
+        "attributes": {"title": "Hello World"}
+      }
+    ]
+  }'
+
+# Query via query nodes
+curl -X POST http://localhost/v1/namespaces/my-docs/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "vector": [0.1, 0.2, 0.3],
+    "top_k": 10
+  }'
 ```
 
-### Authentication
+#### Kubernetes Deployment
+The `examples/distributed/k8s/` directory contains:
+- `indexer-statefulset.yaml`
+- `query-deployment.yaml`
+- `service.yaml`
+- `ingress.yaml`
 
-**Current**: No built-in authentication (v0.1.0)
+The manifests follow standard Kubernetes best practices—StatefulSets for indexers (stable identities), Deployments for query nodes, a headless Service for internal traffic, and an Ingress or Gateway for external requests. Customize resource requests to match workload requirements.
 
-**Workaround**: Use API gateway or reverse proxy
-
-**nginx with API Key**:
-```nginx
-location /v1/ {
-    if ($http_x_api_key != "secret_key_here") {
-        return 401;
-    }
-    proxy_pass http://localhost:3000;
-}
-```
-
-**AWS API Gateway**: Use API keys and usage plans
-
-**Future** (P2): JWT tokens, mTLS
-
-### Data Encryption
-
-**At Rest**:
-- S3: Enable S3 encryption (SSE-S3 or SSE-KMS)
-- Local: Use encrypted disk (LUKS, dm-crypt)
-
-**In Transit**:
-- S3: HTTPS by default
-- Client ↔ Elacsym: Use TLS termination proxy
+## Production Best Practices
+- Use dedicated MinIO/S3 buckets per environment to isolate data.
+- Enable TLS termination at the load balancer (Nginx, AWS ALB, or service mesh).
+- Configure structured logging (`logging.format = "json"`) for log aggregation systems.
+- Monitor WAL cleanup jobs—stale files indicate rotation issues or S3 permissions.
+- Regularly validate backups of manifests and WAL directories.
 
 ## Troubleshooting
 
-### Server Won't Start
+### Issue: `node_id not found in indexer_cluster.nodes`
+**Cause**: Node ID does not match the configured cluster list.
 
-**Check**:
+**Solution**:
 ```bash
-# Port in use
-lsof -i :3000
+echo $ELACSYM_NODE_ID
+grep -A3 "indexer_cluster" /etc/elacsym/config.toml
+```
+Ensure the node ID appears in every node's `distributed.indexer_cluster.nodes` array.
 
-# Storage permissions
-ls -la /var/lib/elacsym
+### Issue: `Role mismatch: node configured as Query but processing as Indexer`
+**Cause**: Environment override (`ELACSYM_NODE_ROLE`) disagrees with config.
 
-# S3 connectivity
-aws s3 ls s3://your-bucket
-
-# View logs
-RUST_LOG=debug ./elacsym
+**Solution**:
+```toml
+[distributed]
+role = "query"  # must match ELACSYM_NODE_ROLE or remove the override
 ```
 
-### High Latency
+### Issue: WAL files are not cleaned up
+**Cause**: Insufficient S3 permissions or network failures during deletion.
 
-**Diagnose**:
+**Solution**:
 ```bash
-# Check cache hit rate (look for "cache miss" in logs)
-grep "cache miss" /var/log/elacsym.log | wc -l
+aws s3 ls s3://your-bucket/wal/
+grep wal_prefix /etc/elacsym/config.toml
+```
+Verify IAM policy allows `s3:DeleteObject` and confirm `wal_prefix` alignment across nodes.
 
-# Check S3 latency
-aws s3 cp s3://your-bucket/test test --region us-west-2
+### Issue: Namespace routing errors
+**Cause**: Indexer cluster list differs between nodes, leading to inconsistent hashing.
 
-# Check disk I/O
-iostat -x 1
+**Solution**:
+```bash
+grep -A5 "indexer_cluster" /etc/elacsym/config*.toml
+```
+Ensure all nodes share the same ordered list of indexer IDs.
+
+## Performance Tuning
+
+### Cache Sizing
+- **Indexer nodes**: 8–16 GiB memory cache, 100–500 GiB disk cache depending on dataset size.
+- **Query nodes**: 4–8 GiB memory cache, 50–100 GiB disk cache—lower write amplification.
+
+### Compaction Settings
+```toml
+[compaction]
+interval_secs = 1800      # Increase frequency for heavy write workloads
+max_segments = 50          # Lower thresholds improve query latency
+max_total_docs = 500000    # Tune based on document size and query SLA
 ```
 
-**Solutions**:
-- Increase cache size
-- Use faster disk for cache (NVMe)
-- Move to same AWS region as S3 bucket
-
-### Out of Memory
-
-**Diagnose**:
-```bash
-# Check memory usage
-docker stats elacsym
-
-# Check cache size
-du -sh /var/cache/elacsym
-```
-
-**Solutions**:
-- Reduce `cache.memory_size`
-- Increase system RAM
-- Enable swap (not recommended for production)
-
-## Production Checklist
-
-Before going to production:
-
-- [ ] Use S3 or distributed storage (not local FS)
-- [ ] Enable S3 versioning for recovery
-- [ ] Set up monitoring (health checks, logs)
-- [ ] Configure backups (S3 automatic, or cron for local)
-- [ ] Use TLS (reverse proxy)
-- [ ] Add authentication (API gateway or proxy)
-- [ ] Set resource limits (Docker/Kubernetes)
-- [ ] Test disaster recovery
-- [ ] Load test your workload
-- [ ] Set up alerting (on health check failures)
-- [ ] Document runbooks for common issues
-
-## Next Steps
-
-- [Configuration](configuration.md) - Tune performance settings
-- [Performance](performance.md) - Optimize for your workload
-- [API Reference](api-reference.md) - Integrate with your application
+### Network Considerations
+- Co-locate indexers and MinIO/S3 in the same availability zone to minimize latency.
+- Use private networking for node ↔ MinIO traffic; avoid traversing the public internet.
+- Monitor S3 request latency (target <20 ms p99) and enable retry policies on transient failures.

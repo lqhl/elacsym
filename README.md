@@ -14,6 +14,7 @@
 - **🔍 Hybrid Search**: Vector similarity + full-text search with RRF fusion
 - **🛡️ Production-Ready**: Write-Ahead Log, crash recovery, automatic compaction
 - **📦 Simple**: Stateless architecture, no distributed consensus
+- **⚖️ Horizontal Scaling**: Dedicated indexer/query roles for multi-node clusters
 - **🌍 Multilingual**: Full-text search in 18 languages with BM25
 
 ## Quick Start
@@ -37,6 +38,10 @@ ELACSYM_STORAGE_PATH=./data ./target/release/elacsym
 
 # Server starts on http://0.0.0.0:3000
 ```
+
+> **Note**: WAL configuration is now mandatory. The default configuration writes WAL files under `./data/wal` for local storage.
+> For distributed deployments, configure an S3 prefix via `storage.s3.wal_prefix` or environment overrides. See the
+> [migration guide](docs/CHANGELOG.md) for upgrade details.
 
 ### Basic Usage
 
@@ -176,6 +181,42 @@ curl -X POST http://localhost:3000/v1/namespaces/docs/query \
 - **WAL**: MessagePack + CRC32 for durability
 
 See [docs/architecture.md](docs/architecture.md) for details.
+
+## Distributed Deployment
+
+Elacsym scales horizontally by separating write-heavy indexer nodes from read-focused query nodes. A shared S3/MinIO bucket
+stores manifests, segments, and the distributed WAL.
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  Indexer 1  │     │  Indexer 2  │     │  Indexer 3  │
+│  (Shard 0)  │     │  (Shard 1)  │     │  (Shard 2)  │
+└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+       │                   │                    │
+       └───────────────────┴────────────────────┘
+                           │
+                      ┌────▼────┐
+                      │   S3 /  │
+                      │  MinIO  │
+                      └────▲────┘
+                           │
+       ┌───────────────────┴────────────────────┐
+       │                   │                    │
+┌──────▼──────┐     ┌──────▼──────┐     ┌──────▼──────┐
+│  Query Node │     │  Query Node │     │  Query Node │
+│  (Stateless)│     │  (Stateless)│     │  (Stateless)│
+└─────────────┘     └─────────────┘     └─────────────┘
+```
+
+Quick start a full cluster:
+
+```bash
+cd examples/distributed
+docker-compose up -d
+```
+
+Comprehensive instructions, MinIO setup, configuration templates, and troubleshooting tips are available in the
+[Distributed Deployment Guide](docs/deployment.md#distributed-deployment).
 
 ## Performance
 

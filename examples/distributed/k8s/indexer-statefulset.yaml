@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: elacsym-indexer
+spec:
+  serviceName: elacsym-indexer
+  replicas: 3
+  selector:
+    matchLabels:
+      app: elacsym-indexer
+  template:
+    metadata:
+      labels:
+        app: elacsym-indexer
+    spec:
+      containers:
+        - name: elacsym
+          image: ghcr.io/lqhl/elacsym:latest
+          args: ["/usr/local/bin/elacsym"]
+          env:
+            - name: ELACSYM_NODE_ROLE
+              value: indexer
+            - name: ELACSYM_NODE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: elacsym-storage
+                  key: accessKey
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: elacsym-storage
+                  key: secretKey
+          volumeMounts:
+            - name: config
+              mountPath: /etc/elacsym
+            - name: cache
+              mountPath: /var/cache/elacsym
+      volumes:
+        - name: config
+          configMap:
+            name: elacsym-config-indexer
+  volumeClaimTemplates:
+    - metadata:
+        name: cache
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 100Gi

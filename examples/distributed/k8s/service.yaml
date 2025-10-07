@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: elacsym-indexer
+spec:
+  clusterIP: None
+  selector:
+    app: elacsym-indexer
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elacsym-query
+spec:
+  type: ClusterIP
+  selector:
+    app: elacsym-query
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
