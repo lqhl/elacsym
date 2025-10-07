@@ -1,0 +1,36 @@
+[server]
+host = "0.0.0.0"
+port = 3000
+
+[storage]
+backend = "s3"
+
+[storage.s3]
+bucket = "elacsym-data"
+region = "us-east-1"
+endpoint = "http://minio:9000"
+wal_prefix = "production"
+
+[cache]
+memory_size = 4294967296        # 4 GiB
+disk_size = 53687091200         # 50 GiB
+disk_path = "/var/cache/elacsym"
+
+[compaction]
+enabled = false
+
+[logging]
+level = "info"
+format = "json"
+
+[distributed]
+enabled = true
+node_id = "query-1"             # Override per node or via ELACSYM_NODE_ID
+role = "query"
+
+[distributed.indexer_cluster]
+nodes = [
+    "indexer-1",
+    "indexer-2",
+    "indexer-3"
+]

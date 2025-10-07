@@ -119,12 +119,18 @@ Distributed Mode:
 ## 📊 Current Work (2025-10-07)
 
 ### In Progress
-None - awaiting next task selection.
+None - ready for the next task.
 
 ### Blocked
 None
 
 ### Recently Completed
+- ✅ P0 fixes + distributed docs (Codex, 2025-10-07)
+  - [x] Added distributed role validation + regression test (`src/main.rs`).
+  - [x] Documented mandatory WAL configuration (CHANGELOG + README).
+  - [x] Added S3 WAL failure-mode coverage.
+  - [x] Authored distributed deployment guide and example configs.
+  - [x] Ran fmt/clippy/tests and staged PR summary.
 - ✅ Distributed deployment (Codex)
 - ✅ Role-aware compaction (Codex)
 - ✅ Configuration system (Codex)

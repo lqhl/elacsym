@@ -262,7 +262,94 @@ mod tests {
     use super::*;
     use crate::storage::local::LocalStorage;
     use crate::types::Document;
+    use crate::Error;
+    use async_trait::async_trait;
+    use bytes::BytesMut;
+    use std::collections::{HashMap, HashSet};
     use tempfile::TempDir;
+    use tokio::sync::Mutex;
+
+    #[derive(Default)]
+    struct MockStorage {
+        files: Mutex<HashMap<String, Bytes>>,
+        fail_delete: Mutex<HashSet<String>>,
+        list_error: Mutex<Option<String>>,
+    }
+
+    impl MockStorage {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        async fn set_delete_failure(&self, key: String) {
+            self.fail_delete.lock().await.insert(key);
+        }
+
+        async fn set_list_error(&self, error: impl Into<String>) {
+            *self.list_error.lock().await = Some(error.into());
+        }
+    }
+
+    #[async_trait]
+    impl StorageBackend for MockStorage {
+        async fn get(&self, key: &str) -> Result<Bytes> {
+            let files = self.files.lock().await;
+            files
+                .get(key)
+                .cloned()
+                .ok_or_else(|| Error::storage(format!("missing key: {}", key)))
+        }
+
+        async fn put(&self, key: &str, data: Bytes) -> Result<()> {
+            let mut files = self.files.lock().await;
+            files.insert(key.to_string(), data);
+            Ok(())
+        }
+
+        async fn delete(&self, key: &str) -> Result<()> {
+            let fail_guard = self.fail_delete.lock().await;
+            if fail_guard.contains(key) {
+                return Err(Error::storage(format!("forced delete failure for {}", key)));
+            }
+            drop(fail_guard);
+
+            let mut files = self.files.lock().await;
+            files.remove(key);
+            Ok(())
+        }
+
+        async fn exists(&self, key: &str) -> Result<bool> {
+            let files = self.files.lock().await;
+            Ok(files.contains_key(key))
+        }
+
+        async fn list(&self, prefix: &str) -> Result<Vec<String>> {
+            if let Some(err) = self.list_error.lock().await.clone() {
+                return Err(Error::storage(err));
+            }
+
+            let files = self.files.lock().await;
+            let mut keys: Vec<String> = files
+                .keys()
+                .filter(|k| k.starts_with(prefix))
+                .cloned()
+                .collect();
+            keys.sort();
+            Ok(keys)
+        }
+
+        async fn get_range(&self, key: &str, start: u64, end: u64) -> Result<Bytes> {
+            let files = self.files.lock().await;
+            let data = files
+                .get(key)
+                .ok_or_else(|| Error::storage(format!("missing key: {}", key)))?;
+            let start = start as usize;
+            let end = end as usize;
+            let mut buf = BytesMut::with_capacity(end - start);
+            buf.extend_from_slice(&data[start..end]);
+            Ok(buf.freeze())
+        }
+    }
 
     #[tokio::test]
     async fn test_s3_wal_basic() {
@@ -433,5 +520,126 @@ mod tests {
 
         assert_eq!(operations1.len(), 2);
         assert_eq!(operations2.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_s3_wal_rotation_partial_failure() {
+        let storage = Arc::new(MockStorage::new());
+        let wal = S3WalManager::new(
+            "fail_ns".to_string(),
+            "node1".to_string(),
+            storage.clone(),
+            None,
+        );
+
+        for i in 0..3 {
+            let op = WalOperation::Upsert {
+                documents: vec![Document {
+                    id: i,
+                    vector: Some(vec![i as f32]),
+                    attributes: Default::default(),
+                }],
+            };
+            wal.append(op).await.unwrap();
+        }
+
+        let keys = wal.list_wal_files().await.unwrap();
+        assert_eq!(keys.len(), 3);
+
+        storage.set_delete_failure(keys[1].clone()).await;
+
+        wal.truncate().await.unwrap();
+
+        let remaining = storage.list("wal/fail_ns/").await.unwrap();
+        assert_eq!(remaining, vec![keys[1].clone()]);
+    }
+
+    #[tokio::test]
+    async fn test_s3_wal_corruption_recovery() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
+        let wal = S3WalManager::new(
+            "corrupt_ns".to_string(),
+            "node1".to_string(),
+            storage.clone(),
+            None,
+        );
+
+        for i in 0..2 {
+            let op = WalOperation::Upsert {
+                documents: vec![Document {
+                    id: i,
+                    vector: Some(vec![i as f32]),
+                    attributes: Default::default(),
+                }],
+            };
+            wal.append(op).await.unwrap();
+        }
+
+        let files = wal.list_wal_files().await.unwrap();
+        assert_eq!(files.len(), 2);
+
+        let corrupt_path = temp_dir.path().join(&files[0]);
+        let mut data = tokio::fs::read(&corrupt_path).await.unwrap();
+        let last_index = data.len() - 1;
+        data[last_index] ^= 0xFF;
+        tokio::fs::write(&corrupt_path, &data).await.unwrap();
+
+        let operations = wal.replay().await.unwrap();
+        assert_eq!(operations.len(), 1);
+        if let WalOperation::Upsert { documents } = &operations[0] {
+            assert_eq!(documents[0].id, 1);
+        } else {
+            panic!("expected upsert operation");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_s3_wal_list_failure() {
+        let storage = Arc::new(MockStorage::new());
+        storage.set_list_error("list failed").await;
+        let wal = S3WalManager::new("list_ns".to_string(), "node1".to_string(), storage, None);
+
+        let err = wal.list_wal_files().await.unwrap_err();
+        assert!(err.to_string().contains("list failed"));
+    }
+
+    #[tokio::test]
+    async fn test_s3_wal_concurrent_writes() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
+        let namespace = "concurrent_ns".to_string();
+        let nodes = 4;
+        let writes_per_node = 5;
+
+        let mut handles = Vec::new();
+        for node in 0..nodes {
+            let wal = S3WalManager::new(
+                namespace.clone(),
+                format!("node-{}", node),
+                storage.clone(),
+                None,
+            );
+            handles.push(tokio::spawn(async move {
+                for seq in 0..writes_per_node {
+                    let op = WalOperation::Upsert {
+                        documents: vec![Document {
+                            id: (node * 100 + seq) as u64,
+                            vector: Some(vec![seq as f32]),
+                            attributes: Default::default(),
+                        }],
+                    };
+                    wal.append(op).await.unwrap();
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let reader = S3WalManager::new(namespace, "reader".to_string(), storage, None);
+        let operations = reader.replay().await.unwrap();
+        assert_eq!(operations.len(), (nodes * writes_per_node) as usize);
     }
 }

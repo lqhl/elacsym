@@ -1,0 +1,39 @@
+[server]
+host = "0.0.0.0"
+port = 3000
+
+[storage]
+backend = "s3"
+
+[storage.s3]
+bucket = "elacsym-data"
+region = "us-east-1"
+endpoint = "http://minio:9000"
+wal_prefix = "production"
+
+[cache]
+memory_size = 8589934592        # 8 GiB
+disk_size = 107374182400        # 100 GiB
+disk_path = "/var/cache/elacsym"
+
+[compaction]
+enabled = true
+interval_secs = 3600
+max_segments = 100
+max_total_docs = 1000000
+
+[logging]
+level = "info"
+format = "json"
+
+[distributed]
+enabled = true
+node_id = "indexer-1"           # Override per node or via ELACSYM_NODE_ID
+role = "indexer"
+
+[distributed.indexer_cluster]
+nodes = [
+    "indexer-1",
+    "indexer-2",
+    "indexer-3"
+]

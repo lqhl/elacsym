@@ -157,7 +157,17 @@ fn build_app_state(
         if distributed.enabled {
             let (indexer_nodes, dist_role) = validate_distributed_config(distributed)?;
 
-            let (cluster, role, description) = match dist_role {
+            let env_role_override = std::env::var("ELACSYM_NODE_ROLE")
+                .ok()
+                .map(|value| value.parse::<DistributedRole>())
+                .transpose()
+                .context("invalid ELACSYM_NODE_ROLE")?;
+
+            let runtime_role = env_role_override
+                .clone()
+                .unwrap_or_else(|| dist_role.clone());
+
+            let (cluster, role, description) = match runtime_role {
                 DistributedRole::Indexer => {
                     let idx = indexer_nodes
                         .iter()
@@ -169,15 +179,52 @@ fn build_app_state(
                             )
                         })?;
 
+                    if dist_role != DistributedRole::Indexer {
+                        bail!(
+                            "Role mismatch: node configured as {:?} but processing as Indexer. \
+                             Check distributed.role in config",
+                            dist_role
+                        );
+                    }
+
+                    if let Some(env_role) = env_role_override.as_ref() {
+                        if env_role != &DistributedRole::Indexer {
+                            bail!(
+                                "Role mismatch: node configured as {:?} but environment override set to {:?}",
+                                dist_role,
+                                env_role
+                            );
+                        }
+                    }
+
                     let cluster = Arc::new(IndexerCluster::new(
                         NodeConfig::new(node_id.clone(), indexer_nodes.len(), idx),
-                        indexer_nodes,
+                        indexer_nodes.clone(),
                     ));
                     (cluster, NodeRole::Indexer, "indexer")
                 }
                 DistributedRole::Query => {
-                    let cluster =
-                        Arc::new(IndexerCluster::for_query(node_id.clone(), indexer_nodes));
+                    if dist_role != DistributedRole::Query {
+                        bail!(
+                            "Role mismatch: node configured as {:?} but processing as Query",
+                            dist_role
+                        );
+                    }
+
+                    if let Some(env_role) = env_role_override.as_ref() {
+                        if env_role != &DistributedRole::Query {
+                            bail!(
+                                "Role mismatch: node configured as {:?} but environment override set to {:?}",
+                                dist_role,
+                                env_role
+                            );
+                        }
+                    }
+
+                    let cluster = Arc::new(IndexerCluster::for_query(
+                        node_id.clone(),
+                        indexer_nodes.clone(),
+                    ));
                     (cluster, NodeRole::Query, "query")
                 }
             };
@@ -216,6 +263,33 @@ fn validate_distributed_config(
 mod tests {
     use super::*;
     use elacsym::config::{DistributedSection, IndexerClusterSection};
+    use elacsym::namespace::WalConfig;
+    use elacsym::storage::local::LocalStorage;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(ref value) = self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn validate_distributed_config_errors_on_missing_nodes() {
@@ -281,5 +355,41 @@ mod tests {
         let (nodes, role) = validate_distributed_config(&distributed).expect("should succeed");
         assert_eq!(nodes, vec!["node-a", "node-b"]);
         assert_eq!(role, DistributedRole::Query);
+    }
+
+    #[test]
+    fn test_role_mismatch_detection() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
+        let wal_config = WalConfig::local(temp_dir.path().join("wal"));
+        let manager = Arc::new(NamespaceManager::with_compaction_config(
+            storage,
+            None,
+            CompactionConfig::default(),
+            wal_config,
+            "indexer-1".to_string(),
+        ));
+
+        let mut config = AppConfig::default();
+        config.distributed = Some(DistributedSection {
+            enabled: true,
+            node_id: Some("indexer-1".to_string()),
+            role: Some(DistributedRole::Indexer),
+            indexer: Some(IndexerClusterSection {
+                nodes: vec!["indexer-1".to_string()],
+            }),
+        });
+
+        let _guard = EnvVarGuard::set("ELACSYM_NODE_ROLE", "query");
+
+        let result = build_app_state(&config, manager, "indexer-1".to_string());
+        let err = match result {
+            Ok(_) => panic!("expected mismatch error"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("Role mismatch"),
+            "unexpected error: {err:?}"
+        );
     }
 }
