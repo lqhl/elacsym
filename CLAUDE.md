@@ -301,7 +301,7 @@ mod tests {
 
 ### 1. Restore Context
 ```bash
-cd /data00/home/liuqin.v/workspace/elacsym
+cd ~/workspace/elacsym
 cat CLAUDE.md                    # Read this document
 cat docs/architecture.md         # Read architecture
 cargo check                      # Ensure compilation passes
