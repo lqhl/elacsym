@@ -3,7 +3,7 @@
 //! These tests verify end-to-end functionality across multiple components.
 
 use elacsym::cache::{CacheConfig, CacheManager};
-use elacsym::namespace::{CompactionConfig, NamespaceManager};
+use elacsym::namespace::{CompactionConfig, NamespaceManager, WalConfig};
 use elacsym::query::{FilterCondition, FilterExpression, FilterOp, FullTextQuery};
 use elacsym::storage::local::LocalStorage;
 use elacsym::types::{
@@ -19,9 +19,14 @@ use tempfile::TempDir;
 async fn test_end_to_end_workflow() {
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
+    let wal_config = WalConfig::local(temp_dir.path().join("wal"));
 
     // Create namespace manager
-    let manager = Arc::new(NamespaceManager::new(storage, "test-node".to_string()));
+    let manager = Arc::new(NamespaceManager::new(
+        storage,
+        wal_config,
+        "test-node".to_string(),
+    ));
 
     // Define schema
     let mut attributes = HashMap::new();
@@ -134,7 +139,10 @@ async fn test_end_to_end_workflow() {
         query: "computer".to_string(),
         weight: 1.0,
     };
-    let results = namespace.query(None, Some(&ft_query), 10, None).await.unwrap();
+    let results = namespace
+        .query(None, Some(&ft_query), 10, None)
+        .await
+        .unwrap();
     assert!(!results.is_empty());
     assert_eq!(results[0].0.id, 1); // Laptop Computer should match
 
@@ -174,11 +182,17 @@ async fn test_end_to_end_workflow() {
 async fn test_wal_recovery() {
     let temp_dir = TempDir::new().unwrap();
     let storage_path = temp_dir.path().to_path_buf();
+    let wal_root = storage_path.join("wal");
 
     // Phase 1: Create namespace and insert data
     {
         let storage = Arc::new(LocalStorage::new(&storage_path).unwrap());
-        let manager = Arc::new(NamespaceManager::new(storage, "test-node".to_string()));
+        let wal_config = WalConfig::local(wal_root.clone());
+        let manager = Arc::new(NamespaceManager::new(
+            storage,
+            wal_config,
+            "test-node".to_string(),
+        ));
 
         let schema = Schema {
             vector_dim: 64,
@@ -212,7 +226,12 @@ async fn test_wal_recovery() {
     // Phase 2: Reload namespace - WAL should be replayed
     {
         let storage = Arc::new(LocalStorage::new(&storage_path).unwrap());
-        let manager = Arc::new(NamespaceManager::new(storage, "test-node".to_string()));
+        let wal_config = WalConfig::local(wal_root.clone());
+        let manager = Arc::new(NamespaceManager::new(
+            storage,
+            wal_config,
+            "test-node".to_string(),
+        ));
 
         let namespace = manager.get_namespace("test").await.unwrap();
 
@@ -234,15 +253,21 @@ async fn test_with_cache() {
     let cache_dir = TempDir::new().unwrap();
 
     let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
+    let wal_config = WalConfig::local(temp_dir.path().join("wal"));
 
     let cache_config = CacheConfig {
-        memory_size: 100 * 1024 * 1024,  // 100MB
-        disk_size: 500 * 1024 * 1024,    // 500MB
+        memory_size: 100 * 1024 * 1024, // 100MB
+        disk_size: 500 * 1024 * 1024,   // 500MB
         disk_path: cache_dir.path().to_string_lossy().to_string(),
     };
 
     let cache = Arc::new(CacheManager::new(cache_config).await.unwrap());
-    let manager = Arc::new(NamespaceManager::with_cache(storage, cache, "test-node".to_string()));
+    let manager = Arc::new(NamespaceManager::with_cache(
+        storage,
+        cache,
+        wal_config,
+        "test-node".to_string(),
+    ));
 
     let schema = Schema {
         vector_dim: 64,
@@ -282,6 +307,7 @@ async fn test_with_cache() {
 async fn test_compaction() {
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
+    let wal_config = WalConfig::local(temp_dir.path().join("wal"));
 
     // Use compaction config with low threshold
     let compaction_config = CompactionConfig::new(
@@ -294,6 +320,7 @@ async fn test_compaction() {
         storage,
         None,
         compaction_config,
+        wal_config,
         "test-node".to_string(),
     ));
 
@@ -343,11 +370,17 @@ async fn test_compaction() {
 async fn test_namespace_persistence() {
     let temp_dir = TempDir::new().unwrap();
     let storage_path = temp_dir.path().to_path_buf();
+    let wal_root = storage_path.join("wal");
 
     // Phase 1: Create and populate
     {
         let storage = Arc::new(LocalStorage::new(&storage_path).unwrap());
-        let manager = Arc::new(NamespaceManager::new(storage, "test-node".to_string()));
+        let wal_config = WalConfig::local(wal_root.clone());
+        let manager = Arc::new(NamespaceManager::new(
+            storage,
+            wal_config,
+            "test-node".to_string(),
+        ));
 
         let mut attributes = HashMap::new();
         attributes.insert(
@@ -375,7 +408,10 @@ async fn test_namespace_persistence() {
             vector: Some(vec![1.0; 64]),
             attributes: {
                 let mut attrs = HashMap::new();
-                attrs.insert("name".to_string(), AttributeValue::String("Alice".to_string()));
+                attrs.insert(
+                    "name".to_string(),
+                    AttributeValue::String("Alice".to_string()),
+                );
                 attrs
             },
         }];
@@ -386,7 +422,12 @@ async fn test_namespace_persistence() {
     // Phase 2: Reload and verify
     {
         let storage = Arc::new(LocalStorage::new(&storage_path).unwrap());
-        let manager = Arc::new(NamespaceManager::new(storage, "test-node".to_string()));
+        let wal_config = WalConfig::local(wal_root.clone());
+        let manager = Arc::new(NamespaceManager::new(
+            storage,
+            wal_config,
+            "test-node".to_string(),
+        ));
 
         let namespace = manager.get_namespace("persistent").await.unwrap();
 
@@ -412,7 +453,12 @@ async fn test_namespace_persistence() {
 async fn test_multi_field_fulltext() {
     let temp_dir = TempDir::new().unwrap();
     let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
-    let manager = Arc::new(NamespaceManager::new(storage, "test-node".to_string()));
+    let wal_config = WalConfig::local(temp_dir.path().join("wal"));
+    let manager = Arc::new(NamespaceManager::new(
+        storage,
+        wal_config,
+        "test-node".to_string(),
+    ));
 
     let mut attributes = HashMap::new();
     attributes.insert(
@@ -473,7 +519,10 @@ async fn test_multi_field_fulltext() {
         weights,
     };
 
-    let results = namespace.query(None, Some(&ft_query), 10, None).await.unwrap();
+    let results = namespace
+        .query(None, Some(&ft_query), 10, None)
+        .await
+        .unwrap();
     assert!(!results.is_empty());
     assert_eq!(results[0].0.id, 1);
 }

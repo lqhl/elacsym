@@ -6,15 +6,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-use elacsym::namespace::NamespaceManager;
+use elacsym::namespace::{NamespaceManager, WalConfig};
 use elacsym::sharding::{IndexerCluster, NodeConfig};
 use elacsym::storage::local::LocalStorage;
 use elacsym::types::{AttributeSchema, AttributeType, DistanceMetric, Document, Schema};
 
 /// Test cluster setup with 3 indexer nodes
 struct TestCluster {
-    storage_dir: TempDir,
-    storage: Arc<dyn elacsym::storage::StorageBackend>,
+    _storage_dir: TempDir,
+    _storage: Arc<dyn elacsym::storage::StorageBackend>,
     indexers: Vec<(Arc<NamespaceManager>, Arc<IndexerCluster>)>,
     query_node: Arc<NamespaceManager>,
 }
@@ -23,6 +23,7 @@ impl TestCluster {
     async fn new(num_indexers: usize) -> Self {
         let storage_dir = TempDir::new().unwrap();
         let storage = Arc::new(LocalStorage::new(storage_dir.path()).unwrap());
+        let wal_root = storage_dir.path().join("wal");
 
         // Create indexer nodes
         let mut indexers = Vec::new();
@@ -35,7 +36,11 @@ impl TestCluster {
             let config = NodeConfig::new(node_id.clone(), num_indexers, i);
             let cluster = Arc::new(IndexerCluster::new(config, node_ids.clone()));
 
-            let manager = Arc::new(NamespaceManager::new(storage.clone(), node_id));
+            let manager = Arc::new(NamespaceManager::new(
+                storage.clone(),
+                WalConfig::local(wal_root.clone()),
+                node_id,
+            ));
 
             indexers.push((manager, cluster));
         }
@@ -43,12 +48,14 @@ impl TestCluster {
         // Create query node (can handle any namespace)
         let query_node = Arc::new(NamespaceManager::new(
             storage.clone(),
+            WalConfig::local(wal_root.clone()),
             "query-node-1".to_string(),
         ));
+        query_node.set_compaction_enabled(false);
 
         Self {
-            storage_dir,
-            storage,
+            _storage_dir: storage_dir,
+            _storage: storage,
             indexers,
             query_node,
         }
@@ -121,11 +128,17 @@ async fn test_namespace_sharding() {
 
     // With 5 namespaces and 3 indexers, not all indexers may be used
     // Just verify that at least 2 indexers are used (fair distribution)
-    assert!(distribution.len() >= 2, "Distribution should use at least 2 indexers");
+    assert!(
+        distribution.len() >= 2,
+        "Distribution should use at least 2 indexers"
+    );
 
     // Verify no single indexer handles all namespaces
     for count in distribution.values() {
-        assert!(*count < namespaces.len(), "No single indexer should handle all namespaces");
+        assert!(
+            *count < namespaces.len(),
+            "No single indexer should handle all namespaces"
+        );
     }
 }
 
@@ -165,11 +178,7 @@ async fn test_write_and_query_across_nodes() {
     ns.upsert(documents).await.unwrap();
 
     // Query from query node
-    let query_ns = cluster
-        .query_node
-        .get_namespace(ns_name)
-        .await
-        .unwrap();
+    let query_ns = cluster.query_node.get_namespace(ns_name).await.unwrap();
 
     let query_vec = vec![1.5; 64];
     let results = query_ns
@@ -179,6 +188,36 @@ async fn test_write_and_query_across_nodes() {
 
     assert_eq!(results.len(), 2);
     println!("Query results: {} documents found", results.len());
+}
+
+#[tokio::test]
+async fn test_query_node_does_not_run_compaction() {
+    let cluster = TestCluster::new(2).await;
+
+    let schema = Schema {
+        vector_dim: 16,
+        vector_metric: DistanceMetric::L2,
+        attributes: HashMap::new(),
+    };
+
+    let ns_name = "no_compaction";
+    let indexer = cluster.get_indexer_for_namespace(ns_name);
+    indexer
+        .create_namespace(ns_name.to_string(), schema.clone())
+        .await
+        .unwrap();
+
+    // Loading through the query node should not register a compaction manager
+    cluster
+        .query_node
+        .get_namespace(ns_name)
+        .await
+        .expect("query node should load namespace");
+
+    assert!(
+        !cluster.query_node.has_compaction_manager(ns_name).await,
+        "query nodes must not start compaction managers"
+    );
 }
 
 #[tokio::test]
@@ -228,7 +267,10 @@ async fn test_multiple_namespaces_parallel_writes() {
     let results: Vec<_> = futures::future::join_all(handles).await;
     assert_eq!(results.len(), 6);
 
-    println!("Successfully wrote to {} namespaces in parallel", results.len());
+    println!(
+        "Successfully wrote to {} namespaces in parallel",
+        results.len()
+    );
 }
 
 #[tokio::test]

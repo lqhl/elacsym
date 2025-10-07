@@ -13,10 +13,10 @@ pub mod handlers;
 pub mod state;
 
 pub use state::AppState;
+pub use state::NodeRole;
 
-/// Build the API router for single-node mode
-pub fn create_router(manager: Arc<NamespaceManager>) -> Router {
-    let state = AppState::single_node(manager);
+/// Build the API router using the provided application state
+pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(handlers::health))
         .nest(
@@ -29,20 +29,16 @@ pub fn create_router(manager: Arc<NamespaceManager>) -> Router {
         .with_state(state)
 }
 
-/// Build the API router for multi-node mode
-pub fn create_router_with_cluster(
+/// Convenience helper for single-node deployments
+pub fn create_single_node_router(manager: Arc<NamespaceManager>) -> Router {
+    create_router(AppState::single_node(manager))
+}
+
+/// Convenience helper for clustered deployments
+pub fn create_cluster_router(
     manager: Arc<NamespaceManager>,
     cluster: Arc<IndexerCluster>,
+    role: NodeRole,
 ) -> Router {
-    let state = AppState::multi_node(manager, cluster);
-    Router::new()
-        .route("/health", get(handlers::health))
-        .nest(
-            "/v1",
-            Router::new()
-                .route("/namespaces/:namespace", put(handlers::create_namespace))
-                .route("/namespaces/:namespace/upsert", post(handlers::upsert))
-                .route("/namespaces/:namespace/query", post(handlers::query)),
-        )
-        .with_state(state)
+    create_router(AppState::multi_node(manager, cluster, role))
 }

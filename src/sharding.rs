@@ -17,8 +17,8 @@ pub struct NodeConfig {
     /// Total number of indexer nodes in the cluster
     pub total_nodes: usize,
 
-    /// This node's index (0-based)
-    pub node_index: usize,
+    /// This node's index (0-based). `None` indicates a non-indexer (e.g., query-only node).
+    node_index: Option<usize>,
 }
 
 impl NodeConfig {
@@ -31,7 +31,7 @@ impl NodeConfig {
         Self {
             node_id,
             total_nodes,
-            node_index,
+            node_index: Some(node_index),
         }
     }
 
@@ -40,14 +40,31 @@ impl NodeConfig {
         Self {
             node_id,
             total_nodes: 1,
-            node_index: 0,
+            node_index: Some(0),
         }
+    }
+
+    /// Create a configuration for a query-only node that should not own shards locally.
+    pub fn for_query(node_id: String, total_nodes: usize) -> Self {
+        assert!(total_nodes > 0, "total_nodes must be greater than zero");
+        Self {
+            node_id,
+            total_nodes,
+            node_index: None,
+        }
+    }
+
+    /// Return this node's index within the cluster if it owns shards.
+    pub fn node_index(&self) -> Option<usize> {
+        self.node_index
     }
 
     /// Check if this node should handle a given namespace
     pub fn should_handle(&self, namespace: &str) -> bool {
-        let target_index = get_node_index_for_namespace(namespace, self.total_nodes);
-        target_index == self.node_index
+        match self.node_index {
+            Some(idx) => get_node_index_for_namespace(namespace, self.total_nodes) == idx,
+            None => false,
+        }
     }
 
     /// Get the node ID that should handle a given namespace
@@ -98,6 +115,26 @@ impl IndexerCluster {
             "total_nodes must match all_node_ids length"
         );
 
+        assert!(
+            config.node_index().is_some(),
+            "Indexer configuration requires an index"
+        );
+
+        Self {
+            config,
+            all_node_ids,
+        }
+    }
+
+    /// Create a cluster view for query nodes, which do not own shards locally but still
+    /// need routing information for indexer nodes.
+    pub fn for_query(node_id: String, all_node_ids: Vec<String>) -> Self {
+        assert!(
+            !all_node_ids.is_empty(),
+            "Indexer cluster must contain at least one node"
+        );
+        let total_nodes = all_node_ids.len();
+        let config = NodeConfig::for_query(node_id, total_nodes);
         Self {
             config,
             all_node_ids,
@@ -254,6 +291,22 @@ mod tests {
         for count in distribution {
             // Allow 20% deviation
             assert!(count > 250 && count < 450);
+        }
+    }
+
+    #[test]
+    fn test_query_node_configuration() {
+        let config = NodeConfig::for_query("query-1".to_string(), 2);
+        assert!(config.node_index().is_none());
+        assert!(!config.should_handle("any_ns"));
+
+        let all_nodes = vec!["indexer-1".to_string(), "indexer-2".to_string()];
+        let cluster = IndexerCluster::for_query("query-1".to_string(), all_nodes.clone());
+
+        for i in 0..10 {
+            let ns = format!("ns-{}", i);
+            let responsible = cluster.get_responsible_node_id(&ns);
+            assert!(all_nodes.contains(&responsible));
         }
     }
 }

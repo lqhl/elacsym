@@ -1,6 +1,6 @@
 //! Basic usage example for elacsym
 
-use elacsym::namespace::Namespace;
+use elacsym::namespace::{Namespace, WalConfig};
 use elacsym::storage::local::LocalStorage;
 use elacsym::types::{
     AttributeSchema, AttributeType, AttributeValue, DistanceMetric, Document, FullTextConfig,
@@ -8,6 +8,7 @@ use elacsym::types::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[tokio::main]
 async fn main() -> elacsym::Result<()> {
@@ -53,7 +54,19 @@ async fn main() -> elacsym::Result<()> {
 
     // 3. Create namespace
     println!("Creating namespace 'my_docs'...");
-    let namespace = Namespace::create("my_docs".to_string(), schema, storage.clone(), None, "main-node".to_string()).await?;
+    let wal_config = WalConfig::local(temp_dir.path().join("wal"));
+    let wal = wal_config
+        .build("my_docs", storage.clone(), "main-node")
+        .await?;
+    let wal_handle = Arc::new(RwLock::new(wal));
+    let namespace = Namespace::create(
+        "my_docs".to_string(),
+        schema,
+        storage.clone(),
+        None,
+        wal_handle,
+    )
+    .await?;
     println!("✓ Namespace created\n");
 
     // 4. Insert documents

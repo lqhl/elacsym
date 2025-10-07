@@ -216,6 +216,7 @@ impl Drop for CompactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::namespace::WalConfig;
     use crate::storage::local::LocalStorage;
     use crate::types::{
         AttributeSchema, AttributeType, AttributeValue, DistanceMetric, Document, FullTextConfig,
@@ -244,10 +245,20 @@ mod tests {
             attributes: HashMap::new(),
         };
 
+        let wal = WalConfig::local(temp_dir.path().join("wal"))
+            .build("test_ns", storage.clone(), "test-node")
+            .await
+            .unwrap();
         let namespace = Arc::new(
-            Namespace::create("test_ns".to_string(), schema, storage, None, "test-node".to_string())
-                .await
-                .unwrap(),
+            Namespace::create(
+                "test_ns".to_string(),
+                schema,
+                storage,
+                None,
+                Arc::new(RwLock::new(wal)),
+            )
+            .await
+            .unwrap(),
         );
 
         let config = CompactionConfig::for_testing();
@@ -286,10 +297,20 @@ mod tests {
             attributes,
         };
 
+        let wal = WalConfig::local(temp_dir.path().join("wal"))
+            .build("test_ns", storage.clone(), "test-node")
+            .await
+            .unwrap();
         let namespace = Arc::new(
-            Namespace::create("test_ns".to_string(), schema, storage, None, "test-node".to_string())
-                .await
-                .unwrap(),
+            Namespace::create(
+                "test_ns".to_string(),
+                schema,
+                storage,
+                None,
+                Arc::new(RwLock::new(wal)),
+            )
+            .await
+            .unwrap(),
         );
 
         // Insert multiple small batches to create many segments
@@ -352,10 +373,20 @@ mod tests {
             attributes: HashMap::new(),
         };
 
+        let wal = WalConfig::local(temp_dir.path().join("wal"))
+            .build("test_ns", storage.clone(), "test-node")
+            .await
+            .unwrap();
         let namespace = Arc::new(
-            Namespace::create("test_ns".to_string(), schema, storage, None, "test-node".to_string())
-                .await
-                .unwrap(),
+            Namespace::create(
+                "test_ns".to_string(),
+                schema,
+                storage,
+                None,
+                Arc::new(RwLock::new(wal)),
+            )
+            .await
+            .unwrap(),
         );
 
         let config = CompactionConfig::for_testing();

@@ -1,9 +1,10 @@
-use elacsym::namespace::Namespace;
+use elacsym::namespace::{Namespace, WalConfig};
 use elacsym::storage::local::LocalStorage;
 use elacsym::types::{AttributeValue, DistanceMetric, Document, FullTextConfig, Schema};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
+use tokio::sync::RwLock;
 
 #[tokio::test]
 async fn test_wal_recovery_after_crash() {
@@ -59,12 +60,19 @@ async fn test_wal_recovery_after_crash() {
 
     // Create namespace
     let storage = Arc::new(LocalStorage::new(storage_path.clone()).unwrap());
+    let wal_base = storage_path.join("wal");
+    let wal_handle = Arc::new(RwLock::new(
+        WalConfig::local(wal_base.clone())
+            .build(&namespace_name, storage.clone(), "test-node")
+            .await
+            .unwrap(),
+    ));
     let namespace = Namespace::create(
         namespace_name.clone(),
         schema.clone(),
         storage.clone(),
         None,
-        "test-node".to_string(),
+        wal_handle,
     )
     .await
     .unwrap();
@@ -74,7 +82,7 @@ async fn test_wal_recovery_after_crash() {
     {
         use elacsym::wal::WalManager;
 
-        let wal_dir = format!("wal/{}", namespace_name);
+        let wal_dir = wal_base.join(&namespace_name);
         let mut wal = WalManager::new(&wal_dir).await.unwrap();
 
         // Write operation to WAL
@@ -93,8 +101,14 @@ async fn test_wal_recovery_after_crash() {
     drop(namespace);
 
     // Step 2: Reload namespace - WAL should be replayed
-    let storage2 = Arc::new(LocalStorage::new(storage_path).unwrap());
-    let namespace2 = Namespace::load(namespace_name, storage2, None, "test-node".to_string())
+    let storage2 = Arc::new(LocalStorage::new(storage_path.clone()).unwrap());
+    let wal_handle = Arc::new(RwLock::new(
+        WalConfig::local(wal_base)
+            .build(&namespace_name, storage2.clone(), "test-node")
+            .await
+            .unwrap(),
+    ));
+    let namespace2 = Namespace::load(namespace_name, storage2, None, wal_handle)
         .await
         .unwrap();
 
@@ -108,7 +122,7 @@ async fn test_wal_recovery_after_crash() {
 
     // Should find at least document 1
     assert!(
-        results.len() >= 1,
+        !results.is_empty(),
         "Expected at least 1 result after WAL recovery, got {}",
         results.len()
     );
@@ -136,9 +150,22 @@ async fn test_wal_empty_after_successful_upsert() {
 
     // Create namespace
     let storage = Arc::new(LocalStorage::new(storage_path.clone()).unwrap());
-    let namespace = Namespace::create("test_wal_truncate".to_string(), schema, storage, None, "test-node".to_string())
-        .await
-        .unwrap();
+    let wal_base = storage_path.join("wal");
+    let wal_handle = Arc::new(RwLock::new(
+        WalConfig::local(wal_base.clone())
+            .build("test_wal_truncate", storage.clone(), "test-node")
+            .await
+            .unwrap(),
+    ));
+    let namespace = Namespace::create(
+        "test_wal_truncate".to_string(),
+        schema,
+        storage,
+        None,
+        wal_handle,
+    )
+    .await
+    .unwrap();
 
     // Upsert documents (should write WAL and then truncate)
     let documents = vec![Document {
@@ -153,7 +180,7 @@ async fn test_wal_empty_after_successful_upsert() {
     // We can check by trying to load - if WAL had entries, they would be replayed
     // Since we just successfully upserted, WAL should be truncated and empty
     use elacsym::wal::WalManager;
-    let wal_dir = "wal/test_wal_truncate";
+    let wal_dir = wal_base.join("test_wal_truncate");
     let wal = WalManager::new(&wal_dir).await.unwrap();
     let entries = wal.read_all().await.unwrap();
     assert_eq!(

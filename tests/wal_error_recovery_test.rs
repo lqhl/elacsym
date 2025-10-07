@@ -128,7 +128,10 @@ async fn test_truncated_wal_file() {
         entries.len() < 5,
         "Should have lost some entries due to truncation"
     );
-    assert!(entries.len() > 0, "Should have recovered at least 1 entry");
+    assert!(
+        !entries.is_empty(),
+        "Should have recovered at least 1 entry"
+    );
 }
 
 /// Test recovery from completely empty WAL (after header)

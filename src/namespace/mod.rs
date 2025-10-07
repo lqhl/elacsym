@@ -9,6 +9,8 @@
 pub mod compaction;
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -19,15 +21,62 @@ use crate::query::{fusion, FilterExecutor, FilterExpression, FullTextQuery};
 use crate::segment::{SegmentReader, SegmentWriter};
 use crate::storage::StorageBackend;
 use crate::types::{AttributeValue, DocId, Document, FullTextConfig, Schema, SegmentInfo, Vector};
-use crate::wal::{WalManager, WalOperation};
+use crate::wal::{S3WalManager, Wal, WalManager, WalOperation};
 use crate::{Error, Result};
 
 pub use compaction::{CompactionConfig, CompactionManager};
 
+/// Configuration describing how namespaces should build their WAL backends.
+#[derive(Debug, Clone)]
+pub enum WalConfig {
+    /// Local filesystem WAL stored under the given base directory.
+    Local { base_path: PathBuf },
+    /// S3-backed WAL shared across nodes with an optional object prefix for multi-tenant buckets.
+    S3 { prefix: Option<String> },
+}
+
+impl WalConfig {
+    /// Create a configuration for local filesystem WALs.
+    pub fn local<P: Into<PathBuf>>(base_path: P) -> Self {
+        Self::Local {
+            base_path: base_path.into(),
+        }
+    }
+
+    /// Convenience helper for S3-backed WALs.
+    pub fn s3(prefix: Option<String>) -> Self {
+        Self::S3 { prefix }
+    }
+
+    /// Build a WAL backend for the provided namespace.
+    pub async fn build(
+        &self,
+        namespace: &str,
+        storage: Arc<dyn StorageBackend>,
+        node_id: &str,
+    ) -> Result<Box<dyn Wal>> {
+        match self {
+            WalConfig::Local { base_path } => {
+                let path = base_path.join(namespace);
+                let wal = WalManager::new(&path).await?;
+                Ok(Box::new(wal))
+            }
+            WalConfig::S3 { prefix } => {
+                let wal = S3WalManager::new(
+                    namespace.to_string(),
+                    node_id.to_string(),
+                    storage,
+                    prefix.clone(),
+                );
+                Ok(Box::new(wal))
+            }
+        }
+    }
+}
+
 /// Namespace represents a collection of documents with a shared schema
 pub struct Namespace {
     name: String,
-    node_id: String,  // Node ID for WAL file naming
     storage: Arc<dyn StorageBackend>,
     cache: Option<Arc<CacheManager>>,
     manifest_manager: ManifestManager,
@@ -42,8 +91,7 @@ pub struct Namespace {
     fulltext_indexes: Arc<RwLock<HashMap<String, FullTextIndex>>>,
 
     /// Write-Ahead Log for durability (protected by RwLock)
-    /// Uses local WAL for now, will be replaced with S3WalManager
-    wal: Arc<RwLock<WalManager>>,
+    wal: Arc<RwLock<Box<dyn Wal>>>,
 }
 
 impl Namespace {
@@ -53,7 +101,7 @@ impl Namespace {
         schema: Schema,
         storage: Arc<dyn StorageBackend>,
         cache: Option<Arc<CacheManager>>,
-        node_id: String,
+        wal: Arc<RwLock<Box<dyn Wal>>>,
     ) -> Result<Self> {
         let manifest_manager = ManifestManager::new(storage.clone());
 
@@ -77,20 +125,15 @@ impl Namespace {
             }
         }
 
-        // Create WAL directory for this namespace
-        let wal_dir = format!("wal/{}", name);
-        let wal = WalManager::new(&wal_dir).await?;
-
         Ok(Self {
             name,
-            node_id,
             storage,
             cache,
             manifest_manager,
             manifest: Arc::new(RwLock::new(manifest)),
             vector_index: Arc::new(RwLock::new(vector_index)),
             fulltext_indexes: Arc::new(RwLock::new(fulltext_indexes)),
-            wal: Arc::new(RwLock::new(wal)),
+            wal,
         })
     }
 
@@ -99,7 +142,7 @@ impl Namespace {
         name: String,
         storage: Arc<dyn StorageBackend>,
         cache: Option<Arc<CacheManager>>,
-        node_id: String,
+        wal: Arc<RwLock<Box<dyn Wal>>>,
     ) -> Result<Self> {
         let manifest_manager = ManifestManager::new(storage.clone());
 
@@ -122,34 +165,28 @@ impl Namespace {
             }
         }
 
-        // Create/Load WAL
-        let wal_dir = format!("wal/{}", name);
-        let wal = WalManager::new(&wal_dir).await?;
-
         // Create the namespace instance first
         let namespace = Self {
             name: name.clone(),
-            node_id,
             storage,
             cache,
             manifest_manager,
             manifest: Arc::new(RwLock::new(manifest)),
             vector_index: Arc::new(RwLock::new(vector_index)),
             fulltext_indexes: Arc::new(RwLock::new(fulltext_indexes)),
-            wal: Arc::new(RwLock::new(wal)),
+            wal,
         };
 
         // Replay WAL entries if any exist (crash recovery)
         {
-            let wal_guard = namespace.wal.read().await;
+            let mut wal_guard = namespace.wal.write().await;
             let operations = wal_guard.replay().await?;
-            drop(wal_guard);
 
             if !operations.is_empty() {
                 tracing::info!(
-                    "Replaying {} WAL operations for namespace '{}'",
-                    operations.len(),
-                    name
+                    namespace = %name,
+                    wal_entries = operations.len(),
+                    "Replaying WAL operations for namespace"
                 );
 
                 for op in operations {
@@ -167,10 +204,8 @@ impl Namespace {
                     }
                 }
 
-                // Truncate WAL after successful replay
-                let mut wal_guard = namespace.wal.write().await;
                 wal_guard.truncate().await?;
-                tracing::info!("WAL replay complete for namespace '{}'", name);
+                tracing::info!(namespace = %name, "WAL replay complete for namespace");
             }
         }
 
@@ -349,7 +384,7 @@ impl Namespace {
                 if let AttributeValue::String(text) = value {
                     all_texts
                         .entry(field_name.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push((doc.id, text.clone()));
                 }
             }
@@ -657,7 +692,7 @@ impl Namespace {
                 if doc_id >= &segment.id_range.0 && doc_id <= &segment.id_range.1 {
                     segment_to_docs
                         .entry(segment.segment_id.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(*doc_id);
                     break;
                 }
@@ -862,7 +897,11 @@ impl Namespace {
         let min_id = *ids.iter().min().unwrap();
         let max_id = *ids.iter().max().unwrap();
 
-        tracing::info!("Wrote merged segment: {} ({} docs)", new_segment_id, all_documents.len());
+        tracing::info!(
+            "Wrote merged segment: {} ({} docs)",
+            new_segment_id,
+            all_documents.len()
+        );
 
         // Build per-segment indexes (same as upsert_internal)
         let schema = self.manifest.read().await.schema.clone();
@@ -1046,18 +1085,22 @@ pub struct NamespaceManager {
     namespaces: Arc<RwLock<HashMap<String, Arc<Namespace>>>>,
     compaction_config: CompactionConfig,
     compaction_managers: Arc<RwLock<HashMap<String, Arc<CompactionManager>>>>,
-    node_id: String,  // Node ID for this manager
+    wal_config: WalConfig,
+    node_id: String, // Node ID for this manager
+    compaction_enabled: AtomicBool,
 }
 
 impl NamespaceManager {
-    pub fn new(storage: Arc<dyn StorageBackend>, node_id: String) -> Self {
+    pub fn new(storage: Arc<dyn StorageBackend>, wal_config: WalConfig, node_id: String) -> Self {
         Self {
             storage,
             cache: None,
             namespaces: Arc::new(RwLock::new(HashMap::new())),
             compaction_config: CompactionConfig::default(),
             compaction_managers: Arc::new(RwLock::new(HashMap::new())),
+            wal_config,
             node_id,
+            compaction_enabled: AtomicBool::new(true),
         }
     }
 
@@ -1065,6 +1108,7 @@ impl NamespaceManager {
     pub fn with_cache(
         storage: Arc<dyn StorageBackend>,
         cache: Arc<CacheManager>,
+        wal_config: WalConfig,
         node_id: String,
     ) -> Self {
         Self {
@@ -1073,7 +1117,9 @@ impl NamespaceManager {
             namespaces: Arc::new(RwLock::new(HashMap::new())),
             compaction_config: CompactionConfig::default(),
             compaction_managers: Arc::new(RwLock::new(HashMap::new())),
+            wal_config,
             node_id,
+            compaction_enabled: AtomicBool::new(true),
         }
     }
 
@@ -1082,6 +1128,7 @@ impl NamespaceManager {
         storage: Arc<dyn StorageBackend>,
         cache: Option<Arc<CacheManager>>,
         compaction_config: CompactionConfig,
+        wal_config: WalConfig,
         node_id: String,
     ) -> Self {
         Self {
@@ -1090,13 +1137,33 @@ impl NamespaceManager {
             namespaces: Arc::new(RwLock::new(HashMap::new())),
             compaction_config,
             compaction_managers: Arc::new(RwLock::new(HashMap::new())),
+            wal_config,
             node_id,
+            compaction_enabled: AtomicBool::new(true),
         }
+    }
+
+    async fn create_wal_handle(&self, namespace: &str) -> Result<Arc<RwLock<Box<dyn Wal>>>> {
+        let wal = self
+            .wal_config
+            .build(namespace, self.storage.clone(), &self.node_id)
+            .await?;
+        Ok(Arc::new(RwLock::new(wal)))
     }
 
     /// Get the node ID
     pub fn node_id(&self) -> &str {
         &self.node_id
+    }
+
+    /// Enable or disable background compaction.
+    pub fn set_compaction_enabled(&self, enabled: bool) {
+        self.compaction_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Check if compaction is enabled for this manager.
+    pub fn compaction_enabled(&self) -> bool {
+        self.compaction_enabled.load(Ordering::Relaxed)
     }
 
     /// Create a new namespace
@@ -1113,32 +1180,33 @@ impl NamespaceManager {
         }
 
         // Create namespace
+        let wal = self.create_wal_handle(&name).await?;
         let namespace = Arc::new(
             Namespace::create(
                 name.clone(),
                 schema,
                 self.storage.clone(),
                 self.cache.clone(),
-                self.node_id.clone(),
+                wal,
             )
             .await?,
         );
 
-        // Start compaction manager for this namespace
-        let compaction_manager = Arc::new(CompactionManager::new(self.compaction_config.clone()));
-        compaction_manager
-            .start_for_namespace(namespace.clone())
-            .await?;
+        // Start compaction manager for this namespace when enabled
+        if self.compaction_enabled() {
+            let compaction_manager =
+                Arc::new(CompactionManager::new(self.compaction_config.clone()));
+            compaction_manager
+                .start_for_namespace(namespace.clone())
+                .await?;
+
+            let mut managers = self.compaction_managers.write().await;
+            managers.insert(name.clone(), compaction_manager);
+        }
 
         // Store in caches
-        {
-            let mut namespaces = self.namespaces.write().await;
-            namespaces.insert(name.clone(), namespace.clone());
-        }
-        {
-            let mut managers = self.compaction_managers.write().await;
-            managers.insert(name, compaction_manager);
-        }
+        let mut namespaces = self.namespaces.write().await;
+        namespaces.insert(name, namespace.clone());
 
         Ok(namespace)
     }
@@ -1154,33 +1222,37 @@ impl NamespaceManager {
         }
 
         // Try to load from storage
+        let wal = self.create_wal_handle(name).await?;
         let namespace = Arc::new(
             Namespace::load(
                 name.to_string(),
                 self.storage.clone(),
                 self.cache.clone(),
-                self.node_id.clone(),
+                wal,
             )
             .await?,
         );
 
-        // Start compaction manager for this namespace (if not already started)
-        let compaction_manager = Arc::new(CompactionManager::new(self.compaction_config.clone()));
-        compaction_manager
-            .start_for_namespace(namespace.clone())
-            .await?;
+        if self.compaction_enabled() {
+            let compaction_manager =
+                Arc::new(CompactionManager::new(self.compaction_config.clone()));
+            compaction_manager
+                .start_for_namespace(namespace.clone())
+                .await?;
 
-        // Store in caches
-        {
-            let mut namespaces = self.namespaces.write().await;
-            namespaces.insert(name.to_string(), namespace.clone());
-        }
-        {
             let mut managers = self.compaction_managers.write().await;
             managers.insert(name.to_string(), compaction_manager);
         }
 
+        let mut namespaces = self.namespaces.write().await;
+        namespaces.insert(name.to_string(), namespace.clone());
+
         Ok(namespace)
+    }
+
+    pub async fn has_compaction_manager(&self, namespace: &str) -> bool {
+        let managers = self.compaction_managers.read().await;
+        managers.contains_key(namespace)
     }
 
     /// List all namespaces
@@ -1212,12 +1284,25 @@ mod tests {
         AttributeSchema, AttributeType, AttributeValue, DistanceMetric, FullTextConfig,
     };
     use std::collections::HashMap;
+    use std::path::Path;
     use tempfile::TempDir;
+
+    async fn build_wal_handle(
+        wal_base: &Path,
+        storage: Arc<dyn crate::storage::StorageBackend>,
+        namespace: &str,
+        node_id: &str,
+    ) -> Arc<RwLock<Box<dyn Wal>>> {
+        let config = WalConfig::local(wal_base.to_path_buf());
+        let wal = config.build(namespace, storage, node_id).await.unwrap();
+        Arc::new(RwLock::new(wal))
+    }
 
     #[tokio::test]
     async fn test_namespace_create_and_upsert() {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
+        let wal_base = temp_dir.path().join("wal");
 
         let mut attributes = HashMap::new();
         attributes.insert(
@@ -1236,7 +1321,8 @@ mod tests {
         };
 
         // Create namespace
-        let ns = Namespace::create("test_ns".to_string(), schema, storage.clone(), None, "test-node".to_string())
+        let wal = build_wal_handle(&wal_base, storage.clone(), "test_ns", "test-node").await;
+        let ns = Namespace::create("test_ns".to_string(), schema, storage.clone(), None, wal)
             .await
             .unwrap();
 
@@ -1279,6 +1365,7 @@ mod tests {
     async fn test_namespace_query() {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
+        let wal_base = temp_dir.path().join("wal");
 
         let mut attributes = HashMap::new();
         attributes.insert(
@@ -1296,7 +1383,8 @@ mod tests {
             attributes,
         };
 
-        let ns = Namespace::create("test_ns".to_string(), schema, storage, None, "test-node".to_string())
+        let wal = build_wal_handle(&wal_base, storage.clone(), "test_ns", "test-node").await;
+        let ns = Namespace::create("test_ns".to_string(), schema, storage, None, wal)
             .await
             .unwrap();
 
@@ -1357,6 +1445,7 @@ mod tests {
     async fn test_namespace_query_with_filter() {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
+        let wal_base = temp_dir.path().join("wal");
 
         let mut attributes = HashMap::new();
         attributes.insert(
@@ -1390,7 +1479,8 @@ mod tests {
             attributes,
         };
 
-        let ns = Namespace::create("test_ns".to_string(), schema, storage, None, "test-node".to_string())
+        let wal = build_wal_handle(&wal_base, storage.clone(), "test_ns", "test-node").await;
+        let ns = Namespace::create("test_ns".to_string(), schema, storage, None, wal)
             .await
             .unwrap();
 
@@ -1488,6 +1578,7 @@ mod tests {
     async fn test_namespace_fulltext_search() {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
+        let wal_base = temp_dir.path().join("wal");
 
         let mut attributes = HashMap::new();
         attributes.insert(
@@ -1505,7 +1596,8 @@ mod tests {
             attributes,
         };
 
-        let ns = Namespace::create("test_ns".to_string(), schema, storage, None, "test-node".to_string())
+        let wal = build_wal_handle(&wal_base, storage.clone(), "test_ns", "test-node").await;
+        let ns = Namespace::create("test_ns".to_string(), schema, storage, None, wal)
             .await
             .unwrap();
 
@@ -1569,6 +1661,7 @@ mod tests {
     async fn test_namespace_hybrid_search() {
         let temp_dir = TempDir::new().unwrap();
         let storage = Arc::new(LocalStorage::new(temp_dir.path()).unwrap());
+        let wal_base = temp_dir.path().join("wal");
 
         let mut attributes = HashMap::new();
         attributes.insert(
@@ -1586,7 +1679,8 @@ mod tests {
             attributes,
         };
 
-        let ns = Namespace::create("test_ns".to_string(), schema, storage, None, "test-node".to_string())
+        let wal = build_wal_handle(&wal_base, storage.clone(), "test_ns", "test-node").await;
+        let ns = Namespace::create("test_ns".to_string(), schema, storage, None, wal)
             .await
             .unwrap();
 
