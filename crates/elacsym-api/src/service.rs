@@ -149,10 +149,17 @@ impl<S: MetadataStore> VectorDBService<S> {
 
         debug!("Freshness layer returned {} results", freshness_results.len());
 
-        // TODO: Search main index (slabs) as well
-        // For now, just return freshness layer results
+        // Search main index (slabs)
+        let main_results = self.search_main_index(&namespace, &request.vector, &search_config).await?;
 
-        let matches = freshness_results
+        debug!("Main index returned {} results", main_results.len());
+
+        // Merge results
+        let merged_results = self.merge_search_results(freshness_results, main_results, request.top_k);
+
+        debug!("Merged {} total results", merged_results.len());
+
+        let matches = merged_results
             .into_iter()
             .map(|sv| ScoredVectorData {
                 id: sv.id.to_string(),
@@ -171,6 +178,86 @@ impl<S: MetadataStore> VectorDBService<S> {
             .collect();
 
         Ok(QueryResponse { matches })
+    }
+
+    /// Search main index (slabs)
+    async fn search_main_index(
+        &self,
+        namespace: &str,
+        query: &[f32],
+        search_config: &SearchConfig,
+    ) -> Result<Vec<ScoredVector>> {
+        // Get all slab IDs for this namespace
+        let slab_ids = self.storage.list_slabs(namespace).await?;
+
+        if slab_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        debug!("Searching {} slabs in namespace {}", slab_ids.len(), namespace);
+
+        let mut all_slabs = Vec::new();
+
+        // Load all slabs (in production, this should be cached and parallelized)
+        for slab_id in slab_ids {
+            match self.storage.get_slab_with_namespace(namespace, &slab_id).await? {
+                Some(slab) => all_slabs.push(slab),
+                None => {
+                    debug!("Slab {} not found in storage", slab_id);
+                }
+            }
+        }
+
+        if all_slabs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Search all slabs
+        let executor = QueryExecutor::new(search_config.clone());
+        executor.search_slabs(&all_slabs, query)
+    }
+
+    /// Merge results from freshness layer and main index
+    fn merge_search_results(
+        &self,
+        mut freshness_results: Vec<ScoredVector>,
+        mut main_results: Vec<ScoredVector>,
+        top_k: usize,
+    ) -> Vec<ScoredVector> {
+        // Combine all results
+        let mut all_results = Vec::new();
+        all_results.append(&mut freshness_results);
+        all_results.append(&mut main_results);
+
+        // Remove duplicates (keep the one with better score)
+        let mut seen = HashMap::new();
+        let mut deduped = Vec::new();
+
+        for result in all_results {
+            let id_str = result.id.to_string();
+
+            if let Some(existing_score) = seen.get(&id_str) {
+                // Keep the one with lower distance (better score for L2)
+                if result.score < *existing_score {
+                    seen.insert(id_str.clone(), result.score);
+                    // Replace in deduped
+                    if let Some(pos) = deduped.iter().position(|r: &ScoredVector| r.id.to_string() == id_str) {
+                        deduped[pos] = result;
+                    }
+                }
+            } else {
+                seen.insert(id_str, result.score);
+                deduped.push(result);
+            }
+        }
+
+        // Sort by score (ascending for L2 distance)
+        deduped.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Take top-k
+        deduped.truncate(top_k);
+
+        deduped
     }
 
     /// Fetch vectors by ID

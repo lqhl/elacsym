@@ -1,0 +1,65 @@
+# elacsym Configuration File
+# Copy this file to config.toml and modify as needed
+
+[server]
+# Server host and port
+host = "0.0.0.0"
+port = 8080
+
+# Log level: trace, debug, info, warn, error
+log_level = "info"
+
+[storage]
+# Storage backend: memory, local, s3
+backend = "local"
+
+# Base path for storing slabs
+base_path = "slabs"
+
+# Local storage path (if using local backend)
+local_path = "./data/slabs"
+
+# S3 configuration (if using s3 backend)
+# s3_bucket = "my-elacsym-bucket"
+# s3_region = "us-east-1"
+# s3_endpoint = "https://s3.amazonaws.com"  # Optional, for S3-compatible storage like MinIO
+
+[storage.cache]
+# Maximum cache size in bytes (1GB)
+max_size_bytes = 1073741824
+
+# Maximum number of slabs to cache
+max_slabs = 1000
+
+[metadata]
+# Path to RocksDB metadata storage
+path = "./data/metadata"
+
+[index]
+# Default vector dimension
+default_dimension = 128
+
+# Default distance metric: l2, inner_product, cosine
+default_metric = "l2"
+
+# Number of IVF partitions
+nlist = 1024
+
+# Quantization bits (3-8, recommended 4-6)
+total_bits = 6
+
+# Use faster config for datasets > 100K vectors
+use_faster_config = false
+
+# Default nprobe for queries (higher = better recall, slower)
+default_nprobe = 16
+
+[builder]
+# Minimum vectors before building an index
+min_vectors = 1000
+
+# Maximum vectors per slab
+max_vectors_per_slab = 100000
+
+# Build interval in seconds
+build_interval_secs = 60

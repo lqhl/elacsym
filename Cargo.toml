@@ -7,6 +7,7 @@ members = [
     "crates/elacsym-builder",
     "crates/elacsym-api",
     "crates/elacsym-common",
+    "crates/elacsym-config",
     "bin",
 ]
 resolver = "2"
@@ -56,11 +57,30 @@ uuid = { version = "1.11", features = ["v4", "serde"] }
 dashmap = "6.1"
 parking_lot = "0.12"
 crossbeam = "0.8"
+clap = { version = "4.5", features = ["derive"] }
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+
+# Config
+toml = "0.8"
 
 # Testing
 mockall = "0.13"
 tempfile = "3.8"
 reqwest = { version = "0.12", features = ["json"] }
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "vector_operations"
+harness = false
+
+[dev-dependencies]
+criterion = { workspace = true }
+elacsym-core = { path = "crates/elacsym-core" }
+elacsym-index = { path = "crates/elacsym-index" }
+elacsym-storage = { path = "crates/elacsym-storage" }
+elacsym-metadata = { path = "crates/elacsym-metadata" }
+elacsym-builder = { path = "crates/elacsym-builder" }
+tokio = { workspace = true }
+tempfile = { workspace = true }

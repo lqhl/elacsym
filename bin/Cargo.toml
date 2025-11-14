@@ -8,6 +8,10 @@ publish = false
 name = "elacsym-server"
 path = "elacsym-server.rs"
 
+[[bin]]
+name = "elacsym"
+path = "elacsym-cli.rs"
+
 [dependencies]
 elacsym-core = { path = "../crates/elacsym-core" }
 elacsym-index = { path = "../crates/elacsym-index" }
@@ -15,7 +19,12 @@ elacsym-storage = { path = "../crates/elacsym-storage" }
 elacsym-metadata = { path = "../crates/elacsym-metadata" }
 elacsym-builder = { path = "../crates/elacsym-builder" }
 elacsym-api = { path = "../crates/elacsym-api" }
+elacsym-config = { path = "../crates/elacsym-config" }
 
 tokio = { version = "1.41", features = ["full"] }
 anyhow = "1.0"
-tracing-subscriber = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4.5", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1.0"
