@@ -1,6 +1,6 @@
 //! API request/response models
 
-use elacsym_core::{Metadata, VectorId};
+use elacsym_core::Metadata;
 use serde::{Deserialize, Serialize};
 
 /// Upsert request
@@ -57,6 +57,29 @@ pub struct ScoredVectorData {
     pub values: Option<Vec<f32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Metadata>,
+}
+
+/// Fetch request
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FetchRequest {
+    pub ids: Vec<String>,
+    #[serde(default)]
+    pub namespace: String,
+}
+
+/// Delete request
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeleteRequest {
+    pub ids: Vec<String>,
+    #[serde(default)]
+    pub namespace: String,
+}
+
+/// Create namespace request
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateNamespaceRequest {
+    pub name: String,
+    pub dimension: usize,
 }
 
 /// Error response

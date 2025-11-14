@@ -4,8 +4,10 @@ members = [
     "crates/elacsym-storage",
     "crates/elacsym-index",
     "crates/elacsym-metadata",
+    "crates/elacsym-builder",
     "crates/elacsym-api",
     "crates/elacsym-common",
+    "bin",
 ]
 resolver = "2"
 
@@ -60,3 +62,5 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Testing
 mockall = "0.13"
+tempfile = "3.8"
+reqwest = { version = "0.12", features = ["json"] }
