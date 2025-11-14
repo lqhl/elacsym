@@ -1,0 +1,62 @@
+[workspace]
+members = [
+    "crates/elacsym-core",
+    "crates/elacsym-storage",
+    "crates/elacsym-index",
+    "crates/elacsym-metadata",
+    "crates/elacsym-api",
+    "crates/elacsym-common",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["elacsym contributors"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/lqhl/elacsym"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.41", features = ["full"] }
+async-trait = "0.1"
+
+# ANN Engine
+rabitq = { git = "https://github.com/lqhl/rabitq-rs" }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Storage
+object_store = { version = "0.11", features = ["aws", "gcp", "azure"] }
+bytes = "1.8"
+
+# Metadata storage
+rocksdb = "0.22"
+
+# API frameworks
+axum = "0.8"
+tonic = "0.12"
+prost = "0.13"
+
+# Utilities
+uuid = { version = "1.11", features = ["v4", "serde"] }
+dashmap = "6.1"
+parking_lot = "0.12"
+crossbeam = "0.8"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Testing
+mockall = "0.13"
