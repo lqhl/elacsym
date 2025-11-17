@@ -2,9 +2,11 @@
 
 pub mod store;
 pub mod service;
+pub mod s3;
 
 pub use store::{MetadataStore, RocksDBStore};
 pub use service::{MetadataService, NamespaceMetadata, VectorMapping};
+pub use s3::{S3MetadataStore, S3MetadataService, PartitionMetadata};
 
 use elacsym_core::{PartitionId, VectorId, SlabId};
 use async_trait::async_trait;

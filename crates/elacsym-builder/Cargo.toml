@@ -20,3 +20,4 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 chrono = { workspace = true }
 parking_lot = { workspace = true }
+uuid = { workspace = true }

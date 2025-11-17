@@ -2,9 +2,11 @@
 
 pub mod blob;
 pub mod cache;
+pub mod wal;
 
 pub use blob::{BlobStorage, BlobStorageConfig};
 pub use cache::{SlabCache, CacheConfig};
+pub use wal::{S3WAL, WALBatch, WALDelete, WALEntry};
 
 use elacsym_core::{Result, Slab, SlabId};
 use async_trait::async_trait;

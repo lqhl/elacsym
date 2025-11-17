@@ -25,7 +25,7 @@ tokio = { version = "1.41", features = ["full"] }
 async-trait = "0.1"
 
 # ANN Engine
-rabitq = { git = "https://github.com/lqhl/rabitq-rs" }
+rabitq = { package = "rabitq-rs", git = "https://github.com/lqhl/rabitq-rs" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -70,17 +70,3 @@ mockall = "0.13"
 tempfile = "3.8"
 reqwest = { version = "0.12", features = ["json"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
-
-[[bench]]
-name = "vector_operations"
-harness = false
-
-[dev-dependencies]
-criterion = { workspace = true }
-elacsym-core = { path = "crates/elacsym-core" }
-elacsym-index = { path = "crates/elacsym-index" }
-elacsym-storage = { path = "crates/elacsym-storage" }
-elacsym-metadata = { path = "crates/elacsym-metadata" }
-elacsym-builder = { path = "crates/elacsym-builder" }
-tokio = { workspace = true }
-tempfile = { workspace = true }

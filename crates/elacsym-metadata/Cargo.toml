@@ -11,6 +11,8 @@ elacsym-core = { path = "../elacsym-core" }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 rocksdb = { workspace = true }
+object_store = { workspace = true }
+bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bincode = { workspace = true }
@@ -18,3 +20,4 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
+uuid = { workspace = true }
